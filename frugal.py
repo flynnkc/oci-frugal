@@ -18,10 +18,11 @@ def main():
                         help='Authentication method if not config file')
     parser.add_argument('-p', '--profile', help='Profile to use from config file \
                         -- Defaults to DEFAULT', default='DEFAULT')
-    parser.add_argument('--config', help='Config file location',
+    parser.add_argument('-f', '--file', help='OCI config file location',
                         default='~/.oci/config')
     parser.add_argument('-t', '--tag', help='Tag namespace containing schedule',
                         default='Schedule')
+    parser.add_argument('--config', help='Script config file location', default='./.config.yaml')
     args = parser.parse_args()
 
     # Set log level, get signer, etc.

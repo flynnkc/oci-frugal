@@ -11,37 +11,21 @@ from oci.resource_search.models import ResourceSummaryCollection
 class Search:
 
     search_types = [
-    "instance",
-    "volume",
-    "vcn",
-    "analyticsinstance",
-    "apigateway",
-    "bastion",
-    "bootvolume",
-    "certificateauthority",
-    "instancepool",
-    "clusterscluster",
-    "clustersvirtualnode",
-    "containerinstance",
-    "datacatalog",
-    "application",
-    "disworkspace",
-    "datascienceproject",
-    "autonomousdatabase",
-    "cloudexadatainfrastructure",
-    "dbsystem",
-    "devopsproject",
-    "filesystem",
-    "functionsfunction",
-    "integrationinstance",
-    "loadbalancer",
-    "drg",
-    "networkfirewall",
-    "bucket",
-    "stream",
-    "vault",
-    "vbsinstance"
-    ]
+        "instance",
+        "instancepool",
+        "dbsystem",
+        "vmcluster",
+        "cloudexadatainfrastructure",
+        "cloudvmcluster",
+        "autonomousdatabase",
+        "odainstance",
+        "analyticsinstance",
+        "integrationinstance",
+        "loadbalancer",
+        "goldengatedeployment",
+        "disworkspace",
+        "visualbuilderinstance"
+        ]
 
     def __init__(self, config: Config):
         self.log = logging.getLogger(f'{__name__}.Search')
