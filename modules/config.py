@@ -15,7 +15,7 @@ class Config:
         self.config, self.signer = self.set_signer(args)
         self.args = args
 
-    # Set dependencies on modules
+    # Set dependencies
     def set_config(self, args: Namespace):
         # Debug mode
         if args.debug:
