@@ -12,6 +12,7 @@ type Identity struct {
 	tenantId string
 }
 
+// NewIdentityClient is an identity client generator
 func NewIdentityClient(cfg common.ConfigurationProvider) (*Identity, error) {
 	client, err := identity.NewIdentityClientWithConfigurationProvider(cfg)
 	if err != nil {
@@ -27,6 +28,8 @@ func NewIdentityClient(cfg common.ConfigurationProvider) (*Identity, error) {
 	return &id, nil
 }
 
+// GetRegions returns a slice containing subscribed region identifiers
+// (ex. us-ashburn-1)
 func (id *Identity) GetRegions() ([]string, error) {
 	s := make([]string, 0)
 
