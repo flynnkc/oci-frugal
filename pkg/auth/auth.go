@@ -9,10 +9,8 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/common/auth"
 )
 
-var log *slog.Logger
-
 func NewConfigProvider(authType, profile, file string) (common.ConfigurationProvider, error) {
-	log = slog.Default()
+	log := slog.Default()
 	log.Debug("Creating new Configuration Provider",
 		"Auth Type", authType,
 		"Profile", profile,
