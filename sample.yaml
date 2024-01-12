@@ -1,12 +1,25 @@
 tagNamespace: sampleSchedule
+tagNamespaceId: ocid..123
 tags:
-- name: everyDay
-  start: 7:00am
-  stop: 5:00pm
-  timeZone: UTC
-  days: ["mon", "tue", "wed", "thurs", "fri", "sat", "sun"]
-- name: weekDay
-  start: 7:00am
-  stop: 6:00pm
-  timeZone: UTC
-  days: ["mon", "tue", "wed", "thurs", "fri"]
+    - name: everyDay
+      start: 7:00am
+      stop: 5:00pm
+      timeZone: UTC
+      days:
+        - mon
+        - tue
+        - wed
+        - thurs
+        - fri
+        - sat
+        - sun
+    - name: weekDay
+      start: 7:00am
+      stop: 6:00pm
+      timeZone: UTC
+      days:
+        - mon
+        - tue
+        - wed
+        - thurs
+        - fri

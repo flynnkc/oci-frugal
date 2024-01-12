@@ -10,7 +10,7 @@ import (
 
 	"github.com/flynnkc/goci-frugal/pkg/authentication"
 	configuration "github.com/flynnkc/goci-frugal/pkg/config"
-	ident "github.com/flynnkc/goci-frugal/pkg/identity"
+	"github.com/flynnkc/goci-frugal/pkg/id"
 	"github.com/oracle/oci-go-sdk/v65/common"
 	flag "github.com/spf13/pflag"
 )
@@ -92,7 +92,7 @@ func scaleCmd(action ScalingType) {
 			"Error", err)
 	}
 
-	idClient, err := ident.NewIdentityClient(cfg)
+	idClient, err := id.NewIdentityClient(cfg)
 	if err != nil {
 		slog.Error("Error getting identity client",
 			"Error", err)

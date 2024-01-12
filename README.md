@@ -11,3 +11,7 @@ The goals I am setting out with for this package include:
 - [ ] Setting schedule tags to required
 - [ ] Custom schedule definitions via YAML file input
 - [ ] Container task multiplexing
+
+## Current Task
+
+__Logic to create and update tag namespaces__
