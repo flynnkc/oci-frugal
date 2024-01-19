@@ -102,8 +102,8 @@ func scaleCmd(action ScalingType) {
 	regions := make([]string, 0)
 	if region != "" {
 		regions = append(regions, region)
-		log.Debug("Region specified in flags, not retriving subscribed regions",
-			"Region", regions[0])
+		log.Debug("Region specified in flags, not retrieving subscribed"+
+			"regions", "Region", regions[0])
 	} else {
 		regions, err := idClient.GetRegions()
 		if err != nil {
@@ -152,15 +152,17 @@ func setLogger(level string) *slog.Logger {
 	default:
 		panic("Invalid log level given")
 	}
-	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slogLevel})
+	handler := slog.NewTextHandler(os.Stdout,
+		&slog.HandlerOptions{Level: slogLevel})
 	log := slog.New(handler)
 	slog.SetDefault(log)
 	return log
 }
 
-// getServices returns a slice containing services in search syntax.
-// This is simply for convenience so new services can be added in an organized
-// manner.
+// getServices returns a slice of string containing services in search
+// syntax. This is simply for convenience so new services can be added
+// in an organized manner. Return the slice as there may be reason to
+// loop through the services as part of the process.
 func getServices() []string {
 	services := []string{
 		"instance",

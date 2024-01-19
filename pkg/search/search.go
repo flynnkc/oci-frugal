@@ -24,19 +24,35 @@ func NewSearchClient(
 
 // ResourceSearch generates a search and returns a response
 func (s *Search) ResourceSearch(query string) (*rs.ResourceSummaryCollection, error) {
+	rsc := rs.ResourceSummaryCollection{Items: make([]rs.ResourceSummary, 0)}
+
 	details := rs.StructuredSearchDetails{
 		Query: common.String(query),
 	}
 
-	// TODO Pagination
 	request := rs.SearchResourcesRequest{
 		SearchDetails: details,
 	}
 
-	response, err := s.SearchResources(context.Background(), request)
-	if err != nil {
-		return nil, err
+	searchFunc := func(request rs.SearchResourcesRequest) (rs.SearchResourcesResponse,
+		error) {
+		return s.SearchResources(context.Background(), request)
 	}
 
-	return &response.ResourceSummaryCollection, nil
+	// Pagination
+	for r, err := searchFunc(request); ; r, err = searchFunc(request) {
+		if err != nil {
+			return &rsc, err
+		}
+
+		rsc.Items = append(rsc.Items, r.Items...)
+
+		if r.OpcNextPage != nil {
+			request.Page = r.OpcNextPage
+		} else {
+			break
+		}
+	}
+
+	return &rsc, nil
 }
