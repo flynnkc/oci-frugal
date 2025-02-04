@@ -1,140 +1,110 @@
 package main
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
-	"os/user"
-	"path/filepath"
 	"strings"
 
-	"github.com/flynnkc/goci-frugal/pkg/authentication"
-	configuration "github.com/flynnkc/goci-frugal/pkg/config"
-	"github.com/flynnkc/goci-frugal/pkg/id"
-	"github.com/oracle/oci-go-sdk/v65/common"
-	flag "github.com/spf13/pflag"
+	"github.com/flynnkc/oci-frugal/pkg/authentication"
+	"github.com/flynnkc/oci-frugal/pkg/id"
 )
 
-type ScalingType uint8
-
-const (
-	SCALE_ALL ScalingType = iota
-	SCALE_UP
-	SCALE_DOWN
-)
-
-var (
-	authType string
-	profile  string
-	file     string
-	logLevel string
-	region   string
-)
-
-func main() {
-	usr, err := user.Current()
-	if err != nil {
-		panic(err)
-	}
-
-	// Flags
-	flag.StringVarP(&authType, "auth", "a", string(common.UserPrincipal),
-		"Authentication type [user_principal, instance_principal]")
-	flag.StringVarP(&profile, "profile", "p", "DEFAULT",
-		"Profile to use from OCI config file")
-	flag.StringVarP(&file, "file", "f",
-		filepath.Join(usr.HomeDir, ".oci/config"),
-		"OCI configuration file location")
-	flag.StringVar(&logLevel, "log", "info",
-		"Log level [debug, info, warn, error]")
-	flag.StringVar(&region, "region", "", "Region Identifier to run script on")
-	flag.Parse()
-
-	log := setLogger(logLevel)
-	slog.SetDefault(log)
-	log.Info("Frugal started...")
-	log.Debug("Frugal initialized with arguments",
-		"Args", strings.Join(flag.Args(), ", "),
-		"Auth Type", authType,
-		"Profile", profile,
-		"File", file,
-		"Log Level", logLevel)
-
-	if len(flag.Args()) < 1 {
-		log.Error("No command given, use flag -h for usage instructions")
-		os.Exit(1)
-	}
-
-	switch flag.Arg(0) {
-	case "all":
-		scaleCmd(SCALE_ALL)
-	case "up":
-		scaleCmd(SCALE_UP)
-	case "down":
-		scaleCmd(SCALE_DOWN)
-	case "config":
-		workConfig()
-	default:
-		log.Error("Unsupported command",
-			"Cmd", flag.Arg(0))
-	}
+// Options is a collection of variables that affect behavior of the script
+type Options struct {
+	logLevel string // Logging level [debug, info, warn, error]
+	region   string // Region to run script on (Optional)
+	action   string
+	log      *slog.Logger
 }
 
-func scaleCmd(action ScalingType) {
-	log := slog.Default()
-	// Get a slice of services supported by script in search syntax
-	services := getServices()
-	log.Debug("Supported Services", "Services", strings.Join(services, ", "))
+const (
+	ACTIONTYPE string = "ACTION_TYPE"
+	ALL        string = "ALL"
+	ON         string = "ON"
+	OFF        string = "OFF"
+	LOGLEVEL   string = "LOG_LEVEL"
+	REGION     string = "REGION"
+)
 
-	cfg, err := authentication.NewConfigProvider(authType, profile, file)
-	if err != nil {
-		log.Error("Error encountered in new configuration provider",
-			"Error", err)
+// Supported services to be managed by the script
+var services []string = []string{
+	"instance",
+	"dbsystem",
+	"autonomousdatabase",
+	"analyticsinstance",
+	"integrationinstance",
+}
+
+func main() {
+	logLevel, ok := os.LookupEnv(LOGLEVEL)
+	if !ok {
+		logLevel = "INFO"
 	}
 
-	idClient, err := id.NewIdentityClient(cfg)
-	if err != nil {
-		slog.Error("Error getting identity client",
-			"Error", err)
+	action, ok := os.LookupEnv(ACTIONTYPE)
+	if !ok {
+		action = ALL
 	}
+
+	opt := Options{
+		logLevel: logLevel,
+		region:   os.Getenv(REGION),
+		action:   action,
+	}
+
+	opt.log = setLogger(opt.logLevel)
+	slog.SetDefault(opt.log)
+	opt.log.Info("Frugal started...")
+
+	opt.log.Debug("Frugal initialized with arguments",
+		"Log Level", opt.logLevel,
+		"Action", opt.action)
+
+	run(&opt)
+}
+
+func run(opt *Options) {
+
+	opt.log.Debug("Supported Services", "Services", strings.Join(services, ", "))
 
 	// Set region based on flag or get a list of subscribed regions
-	regions := make([]string, 0)
-	if region != "" {
-		regions = append(regions, region)
-		log.Debug("Region specified in flags, not retrieving subscribed"+
-			"regions", "Region", regions[0])
+	var regions []string
+	if opt.region != "" {
+		regions = append(regions, opt.region)
+		opt.log.Debug("Region specified in flags, not retrieving subscribed regions",
+			"Region", regions[0])
 	} else {
+		provider := authentication.NewDefaultProvider()
+		if provider == nil {
+			opt.log.Error("default provider nil - exiting")
+			os.Exit(1)
+		}
+
+		idClient, err := id.NewIdentityClient(provider)
+		if err != nil {
+			slog.Error("error getting identity client",
+				"error", err)
+		}
+
 		regions, err := idClient.GetRegions()
 		if err != nil {
-			slog.Error("Error getting regions",
-				"Error", err)
+			slog.Error("error getting regions",
+				"error", err)
 		}
-		log.Debug("Regions returned by client",
+
+		opt.log.Debug("Regions returned by client",
 			"Regions", regions)
 	}
 
 	// Main control loop
 	for i, r := range regions {
-		slog.Info("BEGIN SCALING IN NEW REGION",
+		opt.log.Info("BEGIN SCALING IN NEW REGION",
 			"Region", r,
 			"Order", i,
 			"Region Count", len(regions))
 		// Controller goes here
 
 	}
-}
-
-// workConfig is the function that works with configuration files
-func workConfig() {
-	log := slog.Default()
-	data, err := configuration.LoadData(file)
-	if err != nil {
-		log.Error("Error loading configuration file",
-			"File", file,
-			"Error", err)
-	}
-	log.Debug("Configuration File Data", "Data", fmt.Sprintf("%+v", data))
 }
 
 // setLogger is just setting the logger type
@@ -150,27 +120,13 @@ func setLogger(level string) *slog.Logger {
 	case "error":
 		slogLevel = slog.LevelError
 	default:
-		panic("Invalid log level given")
+		log := slog.Default()
+		log.Error("Invalid log level given - setting to warn")
+		slogLevel = slog.LevelWarn
 	}
 	handler := slog.NewTextHandler(os.Stdout,
 		&slog.HandlerOptions{Level: slogLevel})
 	log := slog.New(handler)
 	slog.SetDefault(log)
 	return log
-}
-
-// getServices returns a slice of string containing services in search
-// syntax. This is simply for convenience so new services can be added
-// in an organized manner. Return the slice as there may be reason to
-// loop through the services as part of the process.
-func getServices() []string {
-	services := []string{
-		"instance",
-		"dbsystem",
-		"autonomousdatabase",
-		"analyticsinstance",
-		"integrationinstance",
-	}
-
-	return services
 }
