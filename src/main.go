@@ -5,8 +5,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/flynnkc/oci-frugal/pkg/authentication"
-	"github.com/flynnkc/oci-frugal/pkg/id"
+	"github.com/flynnkc/oci-frugal/src/pkg/authentication"
+	"github.com/flynnkc/oci-frugal/src/pkg/id"
 )
 
 // Options is a collection of variables that affect behavior of the script

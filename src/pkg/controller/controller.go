@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/flynnkc/oci-frugal/pkg/scheduler"
+	"github.com/flynnkc/oci-frugal/src/pkg/scheduler"
 	"github.com/oracle/oci-go-sdk/v65/analytics"
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/common/auth"
