@@ -1,8 +1,8 @@
 module github.com/flynnkc/oci-frugal
 
-go 1.23.3
+go 1.19
 
-require github.com/oracle/oci-go-sdk/v65 v65.82.0
+require github.com/oracle/oci-go-sdk/v65 v65.88.0
 
 require (
 	github.com/gofrs/flock v0.8.1 // indirect
