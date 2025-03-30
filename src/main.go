@@ -6,24 +6,21 @@ import (
 	"strings"
 
 	"github.com/flynnkc/oci-frugal/src/pkg/authentication"
+	"github.com/flynnkc/oci-frugal/src/pkg/controller"
 	"github.com/flynnkc/oci-frugal/src/pkg/id"
+	"github.com/flynnkc/oci-frugal/src/pkg/scheduler"
+	"github.com/oracle/oci-go-sdk/v65/common"
 )
 
-// Options is a collection of variables that affect behavior of the script
-type Options struct {
-	logLevel string // Logging level [debug, info, warn, error]
-	region   string // Region to run script on (Optional)
-	action   string
-	log      *slog.Logger
-}
-
 const (
-	ACTIONTYPE string = "ACTION_TYPE"
-	ALL        string = "ALL"
-	ON         string = "ON"
-	OFF        string = "OFF"
-	LOGLEVEL   string = "LOG_LEVEL"
-	REGION     string = "REGION"
+	ACTIONTYPE   string = "ACTION_TYPE"
+	ALL          string = "ALL"
+	ON           string = "ON"
+	OFF          string = "OFF"
+	LOGLEVEL     string = "LOG_LEVEL"
+	REGION       string = "REGION"
+	PRINCIPAL    string = "PRINCIPAL"
+	TAGNAMESPACE string = "TAG_NAMESPACE"
 )
 
 // Supported services to be managed by the script
@@ -33,6 +30,16 @@ var services []string = []string{
 	"autonomousdatabase",
 	"analyticsinstance",
 	"integrationinstance",
+}
+
+// Options is a collection of variables that affect behavior of the script
+type Options struct {
+	LogLevel     string // Logging level [debug, info, warn, error]
+	Region       string // Region to run script on (Optional)
+	Action       string // Select action(s) to take
+	Principal    string // Principal type, Resource Principal if not set
+	TagNamespace string // Tag Namespace to use, default Schedule
+	log          *slog.Logger
 }
 
 func main() {
@@ -46,35 +53,53 @@ func main() {
 		action = ALL
 	}
 
-	opt := Options{
-		logLevel: logLevel,
-		region:   os.Getenv(REGION),
-		action:   action,
+	tagNamespace, ok := os.LookupEnv(TAGNAMESPACE)
+	if !ok {
+		tagNamespace = "Schedule"
 	}
 
-	opt.log = setLogger(opt.logLevel)
+	opt := Options{
+		LogLevel:     logLevel,
+		Region:       os.Getenv(REGION),
+		Action:       action,
+		Principal:    os.Getenv(PRINCIPAL),
+		TagNamespace: tagNamespace,
+	}
+
+	opt.log = setLogger(opt.LogLevel)
 	slog.SetDefault(opt.log)
 	opt.log.Info("Frugal started...")
 
 	opt.log.Debug("Frugal initialized with arguments",
-		"Log Level", opt.logLevel,
-		"Action", opt.action)
+		"Log Level", opt.LogLevel,
+		"Action", opt.Action,
+		"Region", opt.Region,
+		"Tag Namespace", opt.TagNamespace,
+		"Principal", opt.Principal)
 
 	run(&opt)
 }
 
 func run(opt *Options) {
 
-	opt.log.Debug("Supported Services", "Services", strings.Join(services, ", "))
+	opt.log.Info("Supported Services", "Services", strings.Join(services, ", "))
 
 	// Set region based on flag or get a list of subscribed regions
 	var regions []string
-	if opt.region != "" {
-		regions = append(regions, opt.region)
+	if opt.Region != "" {
+		regions = append(regions, opt.Region)
 		opt.log.Debug("Region specified in flags, not retrieving subscribed regions",
 			"Region", regions[0])
 	} else {
-		provider := authentication.NewDefaultProvider()
+
+		var provider common.ConfigurationProvider
+		if opt.Principal != "" {
+			// Access to file based provider for debugging
+			provider = common.DefaultConfigProvider()
+		} else {
+			// Resource principal provider for intended use case
+			provider = authentication.NewDefaultProvider()
+		}
 		if provider == nil {
 			opt.log.Error("default provider nil - exiting")
 			os.Exit(1)
@@ -96,14 +121,22 @@ func run(opt *Options) {
 			"Regions", regions)
 	}
 
+	scheduler := scheduler.NewAnykeyNLScheduler()
 	// Main control loop
 	for i, r := range regions {
 		opt.log.Info("BEGIN SCALING IN NEW REGION",
 			"Region", r,
 			"Order", i,
 			"Region Count", len(regions))
-		// Controller goes here
 
+		provider := authentication.NewRegionProvider(common.StringToRegion(r))
+		controller, err := controller.NewTagController(provider, opt.TagNamespace)
+		if err != nil {
+			opt.log.Error("Unable to create controller",
+				"error", err)
+		}
+		controller.SetScheduler(scheduler)
+		controller.Run()
 	}
 }
 

@@ -45,38 +45,42 @@ func NewAnykeyNLScheduler() AnykeyNLScheduler {
 	}
 }
 
-func (ts AnykeyNLScheduler) Evaluate(tags AnykeyNLInput) Action {
+// Evaluate determines an action to take on the resource. Input must be of type
+// map[string]string.
+func (ts AnykeyNLScheduler) Evaluate(tags any) (Action, error) {
+
+	t, ok := tags.(map[string]string)
+	if !ok {
+		return NULL_ACTION, ErrInvalidInput
+	}
 
 	// Is today the day of the week?
-	if tag, ok := tags[ts.day]; ok {
-		return ts.parseSchedule(tag)
+	if tag, ok := t[ts.day]; ok {
+		return ts.parseSchedule(tag), nil
 	}
 
 	// Is today a weekday?
 	if _, ok := _WEEKDAYS[ts.day]; ok {
-		return ts.parseSchedule(tags[_WEEKDAY])
+		return ts.parseSchedule(t[_WEEKDAY]), nil
 	}
 
 	// Is today a weekend?
 	if _, ok := _WEEKENDS[ts.day]; ok {
-		return ts.parseSchedule(tags[_WEEKEND])
+		return ts.parseSchedule(t[_WEEKEND]), nil
 	}
 
 	// Is today a day?
-	if tag, ok := tags[_ANYDAY]; ok {
-		return ts.parseSchedule(tag)
+	if tag, ok := t[_ANYDAY]; ok {
+		return ts.parseSchedule(tag), nil
 	}
 
 	// No match, no action
-	return NULL_ACTION
+	return NULL_ACTION, nil
 }
 
 func (ts AnykeyNLScheduler) parseSchedule(sch string) (act Action) {
 	defer func() {
-		// If panic then assume off; might be a little bit spiteful for passing
-		// a string that causes panic.
 		if r := recover(); r != nil {
-			act = OFF
 			fmt.Printf("Panic parsing schedule %v: %v\n", sch, r)
 		}
 	}()
@@ -108,28 +112,4 @@ func (ts AnykeyNLScheduler) parseSchedule(sch string) (act Action) {
 	}
 
 	return
-}
-
-type AnykeyNLInput map[string]string
-
-func NewAnykeyNLInput(in map[string]any) AnykeyNLInput {
-	m := make(AnykeyNLInput)
-
-	for key := range in {
-		if t, ok := in[key].(string); ok {
-			m[key] = t
-		}
-	}
-
-	return m
-}
-
-func (a *AnykeyNLInput) Parse() string {
-	s := ""
-
-	for key, val := range *a {
-		s += fmt.Sprintf("%s - %s\n", key, val)
-	}
-
-	return s
 }

@@ -7,10 +7,11 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/flynnkc/oci-frugal/src/pkg/controller/handlers"
+	"github.com/flynnkc/oci-frugal/src/pkg/controller/task"
 	"github.com/flynnkc/oci-frugal/src/pkg/scheduler"
 	"github.com/oracle/oci-go-sdk/v65/analytics"
 	"github.com/oracle/oci-go-sdk/v65/common"
-	"github.com/oracle/oci-go-sdk/v65/common/auth"
 	"github.com/oracle/oci-go-sdk/v65/core"
 	"github.com/oracle/oci-go-sdk/v65/database"
 	"github.com/oracle/oci-go-sdk/v65/integration"
@@ -48,7 +49,7 @@ type TagController struct {
 // NewController initializes client snad returns a valid controller.
 // If any clients fail to initialze, return nil controller and error.
 func NewTagController(
-	p auth.ConfigurationProviderWithClaimAccess,
+	p common.ConfigurationProvider,
 	tagNamespace string) (*TagController, error) {
 	c := TagController{
 		tagNamespace: tagNamespace,
@@ -83,6 +84,7 @@ func NewTagController(
 		return nil, err
 	}
 	c.search = s
+	c.scheduler = &scheduler.NullScheduler{}
 
 	return &c, nil
 }
@@ -103,6 +105,7 @@ func (tc *TagController) Search(query string) (rs.ResourceSummaryCollection, err
 
 	request := rs.SearchResourcesRequest{
 		SearchDetails: details,
+		Limit:         common.Int(1000),
 	}
 
 	searchFunc := func(request rs.SearchResourcesRequest) (rs.SearchResourcesResponse,
@@ -152,16 +155,27 @@ func (tc *TagController) Run() {
 		}
 
 		// Channels for tasks and results
-		tasks := make(chan rs.ResourceSummary, numWorkers)
+		tasks := make(chan task.Task, numWorkers)
 
 		// Start workers
 		for i := 0; i < numWorkers; i++ {
-			go tc.computeWorker(tasks)
+			go tc.worker(tasks)
 		}
 
 		// Send tasks
 		for _, t := range rsc.Items {
-			tasks <- t
+			// Evaluate results
+			action, err := tc.scheduler.Evaluate(
+				t.DefinedTags[tc.tagNamespace])
+			if err != nil {
+				slog.Error("error evaluating schedule",
+					"error", err)
+				continue
+			} else if action == scheduler.NULL_ACTION {
+				continue
+			}
+
+			tasks <- task.Task{Action: action, Resource: t}
 		}
 
 		tc.log.Info("Finished compute")
@@ -172,10 +186,11 @@ func (tc *TagController) Run() {
 	wg.Wait()
 }
 
-// computeWorker does compute related tasks
-func (tc *TagController) computeWorker(tasks <-chan rs.ResourceSummary) {
-	for task := range tasks {
-
+// worker does compute related tasks
+func (tc *TagController) worker(tasks <-chan task.Task) {
+	for {
+		t := <-tasks
+		handlers.HandleCompute(t)
 	}
 
 }
