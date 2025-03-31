@@ -136,61 +136,64 @@ func (tc *TagController) Run() {
 	tc.log.Info("Beginning TagController Run")
 	var wg sync.WaitGroup
 
+	// Search query where clause
 	where := "where definedTags.Namespace = '%s'"
 
-	// Start queuing up compute workers/tasks
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		tc.log.Info("Starting compute...")
+	// Hold resources found by search
+	items := make([]rs.ResourceSummary, 0)
 
-		rsc, err := tc.Search(fmt.Sprintf(computeQuery+where, tc.tagNamespace))
-		if err != nil {
-			tc.log.Error("error in search",
-				"error", err,
-				"items returned", strconv.Itoa(len(rsc.Items)))
-			if len(rsc.Items) == 0 {
-				return
-			}
-		}
+	// Channels for tasks and results
+	tasks := make(chan task.Task, numWorkers)
 
-		// Channels for tasks and results
-		tasks := make(chan task.Task, numWorkers)
-
-		// Start workers
-		for i := 0; i < numWorkers; i++ {
-			go tc.worker(tasks)
-		}
-
-		// Send tasks
-		for _, t := range rsc.Items {
-			// Evaluate results
-			action, err := tc.scheduler.Evaluate(
-				t.DefinedTags[tc.tagNamespace])
-			if err != nil {
-				slog.Error("error evaluating schedule",
-					"error", err)
-				continue
-			} else if action == scheduler.NULL_ACTION {
-				continue
-			}
-
-			tasks <- task.Task{Action: action, Resource: t}
-		}
-
-		tc.log.Info("Finished compute")
-		close(tasks) // Graceful shutdown
-
-	}()
-
-	wg.Wait()
-}
-
-// worker does compute related tasks
-func (tc *TagController) worker(tasks <-chan task.Task) {
-	for {
-		t := <-tasks
-		handlers.HandleCompute(t)
+	for _, q := range []string{computeQuery, dbsystemQuery, autonomousdbQuery,
+		analyticsQuery, integrationQuery} {
+		rsc, err := tc.Search(fmt.Sprintf(q+where, tc.tagNamespace))
+		tc.log.Error("error in search",
+			"error", err,
+			"items returned", strconv.Itoa(len(rsc.Items)))
+		items = append(items, rsc.Items...)
 	}
 
+	// Start workers
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(tasks <-chan task.Task) {
+			defer wg.Done()
+			for {
+				t, more := <-tasks
+				if !more {
+					return
+				}
+
+				switch *t.Resource.ResourceType {
+				case "instance":
+					handlers.HandleCompute(t)
+				default:
+					tc.log.Warn("Unknown type detected",
+						"type", *t.Resource.ResourceType)
+				}
+			}
+		}(tasks)
+	}
+
+	// Send tasks
+	for _, t := range items {
+		// Evaluate results
+		action, err := tc.scheduler.Evaluate(
+			t.DefinedTags[tc.tagNamespace])
+		if err != nil {
+			slog.Error("error evaluating schedule",
+				"error", err)
+			continue
+		} else if action == scheduler.NULL_ACTION {
+			continue
+		}
+
+		tasks <- task.Task{Action: action, Resource: t}
+	}
+
+	tc.log.Info("Finished compute")
+	close(tasks)
+
+	wg.Wait()
 }
