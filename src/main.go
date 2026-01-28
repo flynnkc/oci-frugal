@@ -6,33 +6,29 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
-	"github.com/flynnkc/oci-frugal/src/pkg/authentication"
+	"github.com/flynnkc/oci-frugal/src/pkg/configuration"
 	"github.com/flynnkc/oci-frugal/src/pkg/controller"
 	"github.com/flynnkc/oci-frugal/src/pkg/id"
 	"github.com/flynnkc/oci-frugal/src/pkg/scheduler"
-	"github.com/oracle/oci-go-sdk/v65/common"
 )
 
 const (
-	ENVPREFIX         string = "FRUGAL_"
-	ACTIONTYPE        string = "ACTION_TYPE"
-	ALL               string = "ALL"
-	ON                string = "ON"
-	OFF               string = "OFF"
-	LOGLEVEL          string = "LOG_LEVEL"
-	REGION            string = "REGION"
-	PRINCIPAL         string = "AUTH_TYPE"
-	TAGNAMESPACE      string = "TAG_NAMESPACE"
-	APIKEY            string = "api_key"
-	INSTANCEPRINCIPAL string = "instance_principal"
-	RESOURCEPRINCIPAL string = "resource_principal"
-	WORKLOADPRINCIPAL string = "workload_principal"
+	ENVPREFIX    string = "FRUGAL_"
+	ACTIONTYPE   string = "ACTION_TYPE"
+	LOGLEVEL     string = "LOG_LEVEL"
+	REGION       string = "REGION"
+	PRINCIPAL    string = "AUTH_TYPE"
+	TAGNAMESPACE string = "TAG_NAMESPACE"
+	TIMEZONE     string = "TIMEZONE"
 )
 
 var (
-	// Type of authentication to use
-	authType string
+	// Authentication variables
+	authType      string
+	configFile    string
+	configProfile string
 	// Region to run script against
 	region string
 	// Supported services to be managed by the script
@@ -45,49 +41,31 @@ var (
 	}
 )
 
-// Options is a collection of variables that affect behavior of the script
-type Options struct {
-	LogLevel     string // Logging level [debug, info, warn, error]
-	Region       string // Region to run script on (Optional)
-	Action       string // Select action(s) to take
-	Principal    string // Principal type, Resource Principal if not set
-	TagNamespace string // Tag Namespace to use, default Schedule
-	log          *slog.Logger
-}
-
 func init() {
 	usage := fmt.Sprintf("authentication type to use [%s, %s, %s, %s]",
-		APIKEY, INSTANCEPRINCIPAL, RESOURCEPRINCIPAL, WORKLOADPRINCIPAL)
+		configuration.APIKEY,
+		configuration.INSTANCEPRINCIPAL,
+		configuration.RESOURCEPRINCIPAL,
+		configuration.WORKLOADPRINCIPAL)
 	flag.StringVar(&authType, "auth", "", usage)
 	flag.StringVar(&region, "region", "", "region to run frugal on")
 	flag.StringVar(&region, "r", "", "region to run frugal on (shorthand)")
+	flag.StringVar(&configFile, "config", "", "OCI configuration file location")
+	flag.StringVar(&configProfile, "profile", "", "OCI configuration file profile")
 }
 
 func main() {
+	keyPass := flag.String("pass", "", "private key password for API Key Authentication")
 	flag.Parse()
 
-	logLevel, ok := os.LookupEnv(fmt.Sprintf("%s%s", ENVPREFIX, LOGLEVEL))
-	if !ok {
-		logLevel = "INFO"
-	}
-
-	action, ok := os.LookupEnv(fmt.Sprintf("%s%s", ENVPREFIX, ACTIONTYPE))
-	if !ok {
-		action = ALL
-	}
-
-	tagNamespace, ok := os.LookupEnv(fmt.Sprintf("%s%s", ENVPREFIX, TAGNAMESPACE))
-	if !ok {
-		tagNamespace = "Schedule"
-	}
+	logLevel := os.Getenv(fmt.Sprintf("%s%s", ENVPREFIX, LOGLEVEL))
+	action := os.Getenv(fmt.Sprintf("%s%s", ENVPREFIX, ACTIONTYPE))
+	tagNamespace := os.Getenv(fmt.Sprintf("%s%s", ENVPREFIX, TAGNAMESPACE))
 
 	// Flags take priority over environment variables
 	if authType == "" {
 		if val, ok := os.LookupEnv(fmt.Sprintf("%s%s", ENVPREFIX, PRINCIPAL)); ok {
 			authType = val
-		} else {
-			// default to resource principal for functions which lack command-line
-			authType = RESOURCEPRINCIPAL
 		}
 	}
 
@@ -97,108 +75,90 @@ func main() {
 		}
 	}
 
-	opt := Options{
-		LogLevel:     logLevel,
-		Region:       region,
-		Action:       action,
-		Principal:    authType,
-		TagNamespace: tagNamespace,
+	cfg, err := configuration.NewConfiguration(
+		logLevel,
+		action,
+		authType,
+		configFile,
+		configProfile,
+		tagNamespace,
+		keyPass)
+	if err != nil {
+		os.Exit(1)
 	}
 
-	opt.log = setLogger(opt.LogLevel)
-	slog.SetDefault(opt.log)
-	opt.log.Info("Frugal started...")
+	slog.SetDefault(cfg.Log)
+	cfg.Log.Info("Frugal started...")
+	cfg.Log.Debug("Frugal initialized with arguments",
+		"Log Level", cfg.LogLevel,
+		"Action", cfg.Action(),
+		"Region", cfg.Region(),
+		"Tag Namespace", cfg.TagNamespace(),
+		"Principal", cfg.AuthType())
 
-	opt.log.Debug("Frugal initialized with arguments",
-		"Log Level", opt.LogLevel,
-		"Action", opt.Action,
-		"Region", opt.Region,
-		"Tag Namespace", opt.TagNamespace,
-		"Principal", opt.Principal)
-
-	run(&opt)
+	run(cfg)
 }
 
-func run(opt *Options) {
+func run(cfg *configuration.Configuration) {
 
-	opt.log.Info("Supported Services", "Services", strings.Join(services, ", "))
+	cfg.Log.Info("Supported Services", "Services", strings.Join(services, ", "))
 
-	// Set region based on flag or get a list of subscribed regions
+	// Set region based on flag/environment variable
 	var regions []string
-	if opt.Region != "" {
-		regions = append(regions, opt.Region)
-		opt.log.Debug("Region specified in flags, not retrieving subscribed regions",
+	if region != "" {
+		regions = append(regions, region)
+		cfg.Log.Debug("Region specified in flags, not retrieving subscribed regions",
 			"Region", regions[0])
 	} else {
-
-		var provider common.ConfigurationProvider
-		if opt.Principal != "" {
-			// Access to file based provider for debugging
-			provider = common.DefaultConfigProvider()
-		} else {
-			// Resource principal provider for intended use case
-			provider = authentication.NewDefaultProvider()
-		}
-		if provider == nil {
-			opt.log.Error("default provider nil - exiting")
-			os.Exit(1)
-		}
-
-		idClient, err := id.NewIdentityClient(provider)
+		// Get list of subscribed regions
+		idClient, err := id.NewIdentityClient(cfg.Provider())
 		if err != nil {
-			slog.Error("error getting identity client",
+			cfg.Log.Error("error getting identity client",
 				"error", err)
+			os.Exit(1)
 		}
 
 		regions, err := idClient.GetRegions()
 		if err != nil {
-			slog.Error("error getting regions",
+			cfg.Log.Error("error getting regions",
 				"error", err)
 		}
+		if len(regions) == 0 {
+			os.Exit(1)
+		}
 
-		opt.log.Debug("Regions returned by client",
+		cfg.Log.Debug("Regions returned by client",
 			"Regions", regions)
 	}
 
-	scheduler := scheduler.NewAnykeyNLScheduler()
+	// Build scheduler with configurable timezone (single TZ for entire run)
+	var sched scheduler.AnykeyNLScheduler
+	if tz := os.Getenv(fmt.Sprintf("%s%s", ENVPREFIX, TIMEZONE)); tz != "" {
+		if loc, err := time.LoadLocation(tz); err != nil {
+			cfg.Log.Error("Invalid timezone provided; falling back to local",
+				"timezone", tz,
+				"error", err)
+			sched = scheduler.NewAnykeyNLScheduler()
+		} else {
+			sched = scheduler.NewAnykeyNLSchedulerWithLocation(loc)
+		}
+	} else {
+		sched = scheduler.NewAnykeyNLScheduler()
+	}
 	// Main control loop
 	for i, r := range regions {
-		opt.log.Info("BEGIN SCALING IN NEW REGION",
+		cfg.Log.Info("BEGIN SCALING IN NEW REGION",
 			"Region", r,
 			"Order", i,
 			"Region Count", len(regions))
 
-		provider := authentication.NewRegionProvider(common.StringToRegion(r))
-		controller, err := controller.NewTagController(provider, opt.TagNamespace)
+		provider := cfg.Provider()
+		controller, err := controller.NewTagController(provider, cfg.TagNamespace())
 		if err != nil {
-			opt.log.Error("Unable to create controller",
+			cfg.Log.Error("Unable to create controller",
 				"error", err)
 		}
-		controller.SetScheduler(scheduler)
+		controller.SetScheduler(sched)
 		controller.Run()
 	}
-}
-
-// setLogger is just setting the logger type
-func setLogger(level string) *slog.Logger {
-	var slogLevel slog.Level
-	switch strings.ToLower(level) {
-	case "debug":
-		slogLevel = slog.LevelDebug
-	case "info":
-		slogLevel = slog.LevelInfo
-	case "warn":
-		slogLevel = slog.LevelWarn
-	case "error":
-		slogLevel = slog.LevelError
-	default:
-		log := slog.Default()
-		log.Error("Invalid log level given - setting to warn")
-		slogLevel = slog.LevelWarn
-	}
-	handler := slog.NewTextHandler(os.Stdout,
-		&slog.HandlerOptions{Level: slogLevel})
-	log := slog.New(handler)
-	slog.SetDefault(log)
-	return log
 }

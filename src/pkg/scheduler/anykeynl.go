@@ -30,18 +30,30 @@ const (
 // AnykeyNL Scheduler inspired by https://github.com/AnykeyNL/OCI-AutoScale and
 // aims to have similar ruleset. Intended to run once an hour.
 type AnykeyNLScheduler struct {
-	now  time.Time
+	loc  *time.Location
 	hour int
 	day  string
 }
 
+// NewAnykeyNLScheduler creates a scheduler using the local system timezone.
 func NewAnykeyNLScheduler() AnykeyNLScheduler {
-	// TODO add timezone support
-	t := time.Now()
+	return NewAnykeyNLSchedulerWithLocation(time.Local)
+}
+
+// NewAnykeyNLSchedulerWithLocation creates a scheduler with the provided
+// timezone. If loc is nil, time.Local is used.
+func NewAnykeyNLSchedulerWithLocation(loc *time.Location) AnykeyNLScheduler {
+	if loc == nil {
+		loc = time.Local
+	}
+
+	// Determine current time components based on configured scheduler timezone
+	now := time.Now().In(loc)
+
 	return AnykeyNLScheduler{
-		now:  t,
-		hour: t.Hour(),
-		day:  t.Weekday().String(),
+		loc:  loc,
+		hour: now.Hour(),
+		day:  now.Weekday().String(),
 	}
 }
 
@@ -55,61 +67,82 @@ func (ts AnykeyNLScheduler) Evaluate(tags any) (Action, error) {
 	}
 
 	// Is today the day of the week?
-	if tag, ok := t[ts.day]; ok {
-		return ts.parseSchedule(tag), nil
+	if tag, ok := t[ts.day]; ok && strings.TrimSpace(tag) != "" {
+		return ts.parseSchedule(tag, ts.hour)
 	}
 
 	// Is today a weekday?
 	if _, ok := _WEEKDAYS[ts.day]; ok {
-		return ts.parseSchedule(t[_WEEKDAY]), nil
+		if tag, ok := t[_WEEKDAY]; ok && strings.TrimSpace(tag) != "" {
+			return ts.parseSchedule(tag, ts.hour)
+		}
 	}
 
 	// Is today a weekend?
 	if _, ok := _WEEKENDS[ts.day]; ok {
-		return ts.parseSchedule(t[_WEEKEND]), nil
+		if tag, ok := t[_WEEKEND]; ok && strings.TrimSpace(tag) != "" {
+			return ts.parseSchedule(tag, ts.hour)
+		}
 	}
 
 	// Is today a day?
-	if tag, ok := t[_ANYDAY]; ok {
-		return ts.parseSchedule(tag), nil
+	if tag, ok := t[_ANYDAY]; ok && strings.TrimSpace(tag) != "" {
+		return ts.parseSchedule(tag, ts.hour)
 	}
 
 	// No match, no action
 	return NULL_ACTION, nil
 }
 
-func (ts AnykeyNLScheduler) parseSchedule(sch string) (act Action) {
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Printf("Panic parsing schedule %v: %v\n", sch, r)
-		}
-	}()
+func (ts AnykeyNLScheduler) parseSchedule(sch string, hour int) (Action, error) {
+	// Default: null action
+	act := NULL_ACTION
 
-	// return null action by default
-	act = NULL_ACTION
+	// Empty or whitespace-only schedule
+	sch = strings.TrimSpace(sch)
+	if sch == "" {
+		return act, nil
+	}
 
-	s := strings.Split(sch, ",")
+	tokens := strings.Split(sch, ",")
+	// Trim tokens
+	for i := range tokens {
+		tokens[i] = strings.TrimSpace(tokens[i])
+	}
 
-	want := s[ts.hour]
-	// No action requested; return default null action
-	if want == "*" {
-		return
+	var want string
+	switch {
+	case len(tokens) == 0:
+		want = "*" // nothing declared means no action
+	case hour < len(tokens):
+		want = tokens[hour]
+	default:
+		// Fewer than 24 tokens: repeat the last provided token
+		want = tokens[len(tokens)-1]
+	}
+
+	if want == "*" || strings.TrimSpace(want) == "" {
+		return act, nil
 	}
 
 	wantInt, err := strconv.Atoi(want)
 	if err != nil {
-		fmt.Printf("Error decoding schedule %v: %v", sch, err)
-		return
+		return act, fmt.Errorf("invalid schedule token %q in %q: %w", want, sch, err)
 	}
 
+	// Backward-compatible mapping and safety clamp for Action(int8)
 	switch {
-	case wantInt < 1:
+	case wantInt <= 0:
 		act = OFF
 	case wantInt == 1:
 		act = ON
-	case wantInt > 1:
-		act = Action(wantInt)
+	default:
+		// Clamp to int8 max to avoid overflow
+		if wantInt > 127 {
+			wantInt = 127
+		}
+		act = Action(int8(wantInt))
 	}
 
-	return
+	return act, nil
 }
