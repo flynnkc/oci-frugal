@@ -1,6 +1,8 @@
 package main
 
 import (
+	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -13,24 +15,35 @@ import (
 )
 
 const (
-	ACTIONTYPE   string = "ACTION_TYPE"
-	ALL          string = "ALL"
-	ON           string = "ON"
-	OFF          string = "OFF"
-	LOGLEVEL     string = "LOG_LEVEL"
-	REGION       string = "REGION"
-	PRINCIPAL    string = "PRINCIPAL"
-	TAGNAMESPACE string = "TAG_NAMESPACE"
+	ENVPREFIX         string = "FRUGAL_"
+	ACTIONTYPE        string = "ACTION_TYPE"
+	ALL               string = "ALL"
+	ON                string = "ON"
+	OFF               string = "OFF"
+	LOGLEVEL          string = "LOG_LEVEL"
+	REGION            string = "REGION"
+	PRINCIPAL         string = "AUTH_TYPE"
+	TAGNAMESPACE      string = "TAG_NAMESPACE"
+	APIKEY            string = "api_key"
+	INSTANCEPRINCIPAL string = "instance_principal"
+	RESOURCEPRINCIPAL string = "resource_principal"
+	WORKLOADPRINCIPAL string = "workload_principal"
 )
 
-// Supported services to be managed by the script
-var services []string = []string{
-	"instance",
-	"dbsystem",
-	"autonomousdatabase",
-	"analyticsinstance",
-	"integrationinstance",
-}
+var (
+	// Type of authentication to use
+	authType string
+	// Region to run script against
+	region string
+	// Supported services to be managed by the script
+	services []string = []string{
+		"instance",
+		"dbsystem",
+		"autonomousdatabase",
+		"analyticsinstance",
+		"integrationinstance",
+	}
+)
 
 // Options is a collection of variables that affect behavior of the script
 type Options struct {
@@ -42,27 +55,53 @@ type Options struct {
 	log          *slog.Logger
 }
 
+func init() {
+	usage := fmt.Sprintf("authentication type to use [%s, %s, %s, %s]",
+		APIKEY, INSTANCEPRINCIPAL, RESOURCEPRINCIPAL, WORKLOADPRINCIPAL)
+	flag.StringVar(&authType, "auth", "", usage)
+	flag.StringVar(&region, "region", "", "region to run frugal on")
+	flag.StringVar(&region, "r", "", "region to run frugal on (shorthand)")
+}
+
 func main() {
-	logLevel, ok := os.LookupEnv(LOGLEVEL)
+	flag.Parse()
+
+	logLevel, ok := os.LookupEnv(fmt.Sprintf("%s%s", ENVPREFIX, LOGLEVEL))
 	if !ok {
 		logLevel = "INFO"
 	}
 
-	action, ok := os.LookupEnv(ACTIONTYPE)
+	action, ok := os.LookupEnv(fmt.Sprintf("%s%s", ENVPREFIX, ACTIONTYPE))
 	if !ok {
 		action = ALL
 	}
 
-	tagNamespace, ok := os.LookupEnv(TAGNAMESPACE)
+	tagNamespace, ok := os.LookupEnv(fmt.Sprintf("%s%s", ENVPREFIX, TAGNAMESPACE))
 	if !ok {
 		tagNamespace = "Schedule"
 	}
 
+	// Flags take priority over environment variables
+	if authType == "" {
+		if val, ok := os.LookupEnv(fmt.Sprintf("%s%s", ENVPREFIX, PRINCIPAL)); ok {
+			authType = val
+		} else {
+			// default to resource principal for functions which lack command-line
+			authType = RESOURCEPRINCIPAL
+		}
+	}
+
+	if region == "" {
+		if val, ok := os.LookupEnv(fmt.Sprintf("%s%s", ENVPREFIX, REGION)); ok {
+			region = val
+		}
+	}
+
 	opt := Options{
 		LogLevel:     logLevel,
-		Region:       os.Getenv(REGION),
+		Region:       region,
 		Action:       action,
-		Principal:    os.Getenv(PRINCIPAL),
+		Principal:    authType,
 		TagNamespace: tagNamespace,
 	}
 
