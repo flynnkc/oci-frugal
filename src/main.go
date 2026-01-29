@@ -29,10 +29,11 @@ var (
 	authType      string
 	configFile    string
 	configProfile string
-	// Region to run script against
-	region string
-	// Supported services to be managed by the script
-	services []string = []string{
+
+	region   string         // Region to run script against
+	timezone *time.Location // Timezone script runs in/as
+
+	services []string = []string{ // Supported services to be managed by the script
 		"instance",
 		"dbsystem",
 		"autonomousdatabase",
@@ -55,6 +56,15 @@ func init() {
 }
 
 func main() {
+	flag.Func("tz", "Timezone in a common format [ex. America/New York]",
+		func(s string) error {
+			tz, err := time.LoadLocation(s)
+			if err != nil {
+				return err
+			}
+			timezone = tz
+			return nil
+		})
 	keyPass := flag.String("pass", "", "private key password for API Key Authentication")
 	flag.Parse()
 
@@ -87,10 +97,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	if timezone == nil {
+		if val, ok := os.LookupEnv(fmt.Sprintf("%s%s", ENVPREFIX, TIMEZONE)); ok {
+			tz, err := time.LoadLocation(val)
+			if err != nil {
+				cfg.Log.Error("error loading timezone from environment",
+					"err", err)
+				os.Exit(2)
+			} else {
+				cfg.Timezone = tz
+			}
+		}
+	}
+
 	slog.SetDefault(cfg.Log)
 	cfg.Log.Info("Frugal started...")
 	cfg.Log.Debug("Frugal initialized with arguments",
-		"Log Level", cfg.LogLevel,
+		"Log Level", logLevel,
 		"Action", cfg.Action(),
 		"Region", cfg.Region(),
 		"Tag Namespace", cfg.TagNamespace(),
@@ -131,20 +154,9 @@ func run(cfg *configuration.Configuration) {
 			"Regions", regions)
 	}
 
-	// Build scheduler with configurable timezone (single TZ for entire run)
-	var sched scheduler.AnykeyNLScheduler
-	if tz := os.Getenv(fmt.Sprintf("%s%s", ENVPREFIX, TIMEZONE)); tz != "" {
-		if loc, err := time.LoadLocation(tz); err != nil {
-			cfg.Log.Error("Invalid timezone provided; falling back to local",
-				"timezone", tz,
-				"error", err)
-			sched = scheduler.NewAnykeyNLScheduler()
-		} else {
-			sched = scheduler.NewAnykeyNLSchedulerWithLocation(loc)
-		}
-	} else {
-		sched = scheduler.NewAnykeyNLScheduler()
-	}
+	schFunc := scheduler.ScheduleFunc(cfg.Schedule())
+	sch := schFunc()
+
 	// Main control loop
 	for i, r := range regions {
 		cfg.Log.Info("BEGIN SCALING IN NEW REGION",
@@ -158,7 +170,7 @@ func run(cfg *configuration.Configuration) {
 			cfg.Log.Error("Unable to create controller",
 				"error", err)
 		}
-		controller.SetScheduler(sched)
+		controller.SetScheduler(sch)
 		controller.Run()
 	}
 }

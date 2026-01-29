@@ -36,13 +36,13 @@ type AnykeyNLScheduler struct {
 }
 
 // NewAnykeyNLScheduler creates a scheduler using the local system timezone.
-func NewAnykeyNLScheduler() AnykeyNLScheduler {
+func NewAnykeyNLScheduler() Scheduler {
 	return NewAnykeyNLSchedulerWithLocation(time.Local)
 }
 
 // NewAnykeyNLSchedulerWithLocation creates a scheduler with the provided
 // timezone. If loc is nil, time.Local is used.
-func NewAnykeyNLSchedulerWithLocation(loc *time.Location) AnykeyNLScheduler {
+func NewAnykeyNLSchedulerWithLocation(loc *time.Location) *AnykeyNLScheduler {
 	if loc == nil {
 		loc = time.Local
 	}
@@ -50,7 +50,7 @@ func NewAnykeyNLSchedulerWithLocation(loc *time.Location) AnykeyNLScheduler {
 	// Determine current time components based on configured scheduler timezone
 	now := time.Now().In(loc)
 
-	return AnykeyNLScheduler{
+	return &AnykeyNLScheduler{
 		loc:  loc,
 		hour: now.Hour(),
 		day:  now.Weekday().String(),
@@ -92,6 +92,15 @@ func (ts AnykeyNLScheduler) Evaluate(tags any) (Action, error) {
 
 	// No match, no action
 	return NULL_ACTION, nil
+}
+
+// SetLocation changes the timezone of the scheduler
+func (ts *AnykeyNLScheduler) SetLocation(loc *time.Location) (Scheduler, error) {
+	if loc == nil {
+		return ts, ErrInvalidTimezone
+	}
+
+	return NewAnykeyNLSchedulerWithLocation(loc), nil
 }
 
 func (ts AnykeyNLScheduler) parseSchedule(sch string, hour int) (Action, error) {

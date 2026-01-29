@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"crypto/x509"
 	"encoding/pem"
@@ -21,17 +22,22 @@ const (
 	INSTANCEPRINCIPAL string = "instance_principal"
 	RESOURCEPRINCIPAL string = "resource_principal"
 	WORKLOADPRINCIPAL string = "workload_principal"
+
 	// Defaults
 	DEFAULT_NAMESPACE string = "Schedule"
 	DEFAULT_LOGLEVEL  string = "INFO"
+
+	// Scheduler
+	ANYKEYNL_SCHEDULER string = "anykeynl"
 )
 
 // Options is a collection of variables that affect behavior of the script
 type Configuration struct {
 	Log                *slog.Logger
-	LogLevel           string                       // Logging level [debug, info, warn, error]
+	Timezone           *time.Location               // Timezone to run script against
 	region             string                       // Region to run script on (Optional)
 	tagNamespace       string                       // Tag Namespace to use, default Schedule
+	schedule           string                       // Scheduler type
 	action             string                       // Select action(s) to take
 	principal          string                       // Principal type, Resource Principal if not set
 	provider           common.ConfigurationProvider // Tag Namespace to use, default Schedule
@@ -90,8 +96,10 @@ func NewConfiguration(logLevel string,
 
 	o := Configuration{
 		Log:                setLogger(logLevel),
+		Timezone:           time.Local,
 		region:             region,
 		tagNamespace:       tagNamespace,
+		schedule:           ANYKEYNL_SCHEDULER,
 		action:             action,
 		principal:          principal,
 		provider:           provider,
@@ -168,6 +176,10 @@ func (c *Configuration) ForRegion(region string) (common.ConfigurationProvider, 
 	// For non-API key principals (instance/resource/workload), return the existing provider.
 	// Region is derived by the underlying environment and typically cannot be overridden here.
 	return c.provider, nil
+}
+
+func (c *Configuration) Schedule() string {
+	return c.schedule
 }
 
 // setLogger is just setting the logger type

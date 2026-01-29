@@ -1,6 +1,11 @@
 package scheduler
 
-import "errors"
+import (
+	"errors"
+	"time"
+
+	"github.com/flynnkc/oci-frugal/src/pkg/configuration"
+)
 
 // Actions are int8 and we reserve positive integers so constants are all <0
 const (
@@ -10,8 +15,9 @@ const (
 )
 
 var (
-	ErrInvalidInput error = errors.New("error invalid input in scheduler")
-	ErrNoScheduler  error = errors.New("error no scheduler set")
+	ErrInvalidInput    error = errors.New("error invalid input in scheduler")
+	ErrNoScheduler     error = errors.New("error no scheduler set")
+	ErrInvalidTimezone error = errors.New("error invalid timezone set")
 )
 
 type Action int8
@@ -19,11 +25,29 @@ type Action int8
 // Scheduler is an interface for anything that can evaluate a resource and return
 // an action.
 type Scheduler interface {
+	// Evaluate takes input and returns a decision or error
 	Evaluate(any) (Action, error)
+	// SetLocation changes the timezone of the scheduler
+	SetLocation(*time.Location) (Scheduler, error)
 }
 
 type NullScheduler struct{}
 
 func (n *NullScheduler) Evaluate(any) (Action, error) {
 	return NULL_ACTION, ErrNoScheduler
+}
+
+func (n *NullScheduler) SetLocation(t *time.Location) (Scheduler, error) {
+	return &NullScheduler{}, ErrNoScheduler
+}
+
+// ScheduleFunc returns the function to generate the schedule based on configurations.
+// Defaults to AnyKeyNL Scheduler.
+func ScheduleFunc(fn string) func() Scheduler {
+	switch fn {
+	case configuration.ANYKEYNL_SCHEDULER:
+		return NewAnykeyNLScheduler
+	default:
+		return NewAnykeyNLScheduler
+	}
 }
