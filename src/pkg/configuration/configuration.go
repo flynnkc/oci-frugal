@@ -3,8 +3,6 @@ package configuration
 import (
 	"fmt"
 	"log/slog"
-	"os"
-	"strings"
 	"time"
 
 	"crypto/x509"
@@ -31,9 +29,10 @@ const (
 	ANYKEYNL_SCHEDULER string = "anykeynl"
 )
 
-// Options is a collection of variables that affect behavior of the script
+// Configuration is a collection of variables that affect behavior of the script.
+// Configuration is responsible for validating and storing any configuration related
+// variables. Default configurations should be set here.
 type Configuration struct {
-	Log                *slog.Logger
 	Timezone           *time.Location               // Timezone to run script against
 	region             string                       // Region to run script on (Optional)
 	tagNamespace       string                       // Tag Namespace to use, default Schedule
@@ -42,6 +41,7 @@ type Configuration struct {
 	principal          string                       // Principal type, Resource Principal if not set
 	provider           common.ConfigurationProvider // Tag Namespace to use, default Schedule
 	privateKeyPassword *string
+	logFunc            func(...any) *slog.Logger
 }
 
 func NewConfiguration(logLevel string,
@@ -51,10 +51,22 @@ func NewConfiguration(logLevel string,
 	profile string,
 	tagNamespace string,
 	keyPass *string) (*Configuration, error) {
-	if logLevel == "" {
-		logLevel = DEFAULT_LOGLEVEL
+	// Log variables
+	var logFunc func(...any) *slog.Logger
+	switch logLevel {
+	case "debug":
+		logFunc = StdTextLoggerDebug
+	case "info":
+		logFunc = StdTextLoggerInfo
+	case "warn":
+		logFunc = StdTextLoggerWarn
+	case "error":
+		logFunc = StdTextLoggerError
+	default:
+		logFunc = StdTextLoggerInfo
 	}
 
+	// Scheduler variables
 	if action == "" {
 		action = ALL
 	}
@@ -63,6 +75,7 @@ func NewConfiguration(logLevel string,
 		tagNamespace = DEFAULT_NAMESPACE
 	}
 
+	// Authentication variables
 	if file == "" {
 		file = "~/.oci/config"
 	}
@@ -83,7 +96,7 @@ func NewConfiguration(logLevel string,
 	case WORKLOADPRINCIPAL:
 		provider, err = auth.OkeWorkloadIdentityConfigurationProvider()
 	default:
-		return nil, fmt.Errorf("error unsupported auth type %s", principal)
+		provider, err = common.ConfigurationProviderFromFileWithProfile(file, profile, *keyPass)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("error building configuration provider: %w", err)
@@ -95,7 +108,6 @@ func NewConfiguration(logLevel string,
 	}
 
 	o := Configuration{
-		Log:                setLogger(logLevel),
 		Timezone:           time.Local,
 		region:             region,
 		tagNamespace:       tagNamespace,
@@ -104,6 +116,7 @@ func NewConfiguration(logLevel string,
 		principal:          principal,
 		provider:           provider,
 		privateKeyPassword: keyPass,
+		logFunc:            logFunc,
 	}
 
 	return &o, nil
@@ -182,26 +195,6 @@ func (c *Configuration) Schedule() string {
 	return c.schedule
 }
 
-// setLogger is just setting the logger type
-func setLogger(level string) *slog.Logger {
-	var slogLevel slog.Level
-	switch strings.ToLower(level) {
-	case "debug":
-		slogLevel = slog.LevelDebug
-	case "info":
-		slogLevel = slog.LevelInfo
-	case "warn":
-		slogLevel = slog.LevelWarn
-	case "error":
-		slogLevel = slog.LevelError
-	default:
-		log := slog.Default()
-		log.Error("Invalid log level given - setting to warn")
-		slogLevel = slog.LevelWarn
-	}
-	handler := slog.NewTextHandler(os.Stdout,
-		&slog.HandlerOptions{Level: slogLevel})
-	log := slog.New(handler)
-	slog.SetDefault(log)
-	return log
+func (c *Configuration) MakeLog(v ...any) *slog.Logger {
+	return c.logFunc(v...)
 }

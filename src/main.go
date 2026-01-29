@@ -94,14 +94,16 @@ func main() {
 		tagNamespace,
 		keyPass)
 	if err != nil {
+		slog.Default().Error("error loading configuration: %w", "err", err)
 		os.Exit(1)
 	}
 
+	log := cfg.MakeLog("Component", "main")
 	if timezone == nil {
 		if val, ok := os.LookupEnv(fmt.Sprintf("%s%s", ENVPREFIX, TIMEZONE)); ok {
 			tz, err := time.LoadLocation(val)
 			if err != nil {
-				cfg.Log.Error("error loading timezone from environment",
+				log.Error("error loading timezone from environment",
 					"err", err)
 				os.Exit(2)
 			} else {
@@ -110,47 +112,50 @@ func main() {
 		}
 	}
 
-	slog.SetDefault(cfg.Log)
-	cfg.Log.Info("Frugal started...")
-	cfg.Log.Debug("Frugal initialized with arguments",
+	log.Info("Frugal started...")
+	log.Debug("Frugal initialized with the following settings",
 		"Log Level", logLevel,
-		"Action", cfg.Action(),
 		"Region", cfg.Region(),
 		"Tag Namespace", cfg.TagNamespace(),
-		"Principal", cfg.AuthType())
+		"Principal", cfg.AuthType(),
+		"Scheduler", configuration.ANYKEYNL_SCHEDULER,
+		"Action", cfg.Action(),
+		"Timezone", cfg.Timezone)
 
 	run(cfg)
 }
 
 func run(cfg *configuration.Configuration) {
+	log := cfg.MakeLog("Component", "run")
 
-	cfg.Log.Info("Supported Services", "Services", strings.Join(services, ", "))
+	log.Info("Supported Services", "Services", strings.Join(services, ", "))
 
 	// Set region based on flag/environment variable
 	var regions []string
 	if region != "" {
 		regions = append(regions, region)
-		cfg.Log.Debug("Region specified in flags, not retrieving subscribed regions",
+		log.Debug("Region specified in flags, not retrieving subscribed regions",
 			"Region", regions[0])
 	} else {
 		// Get list of subscribed regions
 		idClient, err := id.NewIdentityClient(cfg.Provider())
 		if err != nil {
-			cfg.Log.Error("error getting identity client",
+			log.Error("error getting identity client",
 				"error", err)
 			os.Exit(1)
 		}
 
 		regions, err := idClient.GetRegions()
 		if err != nil {
-			cfg.Log.Error("error getting regions",
+			log.Error("error getting regions",
 				"error", err)
 		}
 		if len(regions) == 0 {
+			log.Error("error no regions set")
 			os.Exit(1)
 		}
 
-		cfg.Log.Debug("Regions returned by client",
+		log.Debug("Subscribed regions",
 			"Regions", regions)
 	}
 
@@ -159,7 +164,7 @@ func run(cfg *configuration.Configuration) {
 
 	// Main control loop
 	for i, r := range regions {
-		cfg.Log.Info("BEGIN SCALING IN NEW REGION",
+		log.Info("BEGIN SCALING IN NEW REGION",
 			"Region", r,
 			"Order", i,
 			"Region Count", len(regions))
@@ -167,7 +172,7 @@ func run(cfg *configuration.Configuration) {
 		provider := cfg.Provider()
 		controller, err := controller.NewTagController(provider, cfg.TagNamespace())
 		if err != nil {
-			cfg.Log.Error("Unable to create controller",
+			log.Error("Unable to create controller",
 				"error", err)
 		}
 		controller.SetScheduler(sch)
