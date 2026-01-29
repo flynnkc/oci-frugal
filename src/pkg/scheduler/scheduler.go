@@ -29,6 +29,8 @@ type Scheduler interface {
 	Evaluate(any) (Action, error)
 	// SetLocation changes the timezone of the scheduler
 	SetLocation(*time.Location) (Scheduler, error)
+	// Type returns the type of scheduler in use
+	Type() string
 }
 
 type NullScheduler struct{}
@@ -39,6 +41,10 @@ func (n *NullScheduler) Evaluate(any) (Action, error) {
 
 func (n *NullScheduler) SetLocation(t *time.Location) (Scheduler, error) {
 	return &NullScheduler{}, ErrNoScheduler
+}
+
+func (n *NullScheduler) Type() string {
+	return configuration.NULL_SCHEDULER
 }
 
 // ScheduleFunc returns the function to generate the schedule based on configurations.

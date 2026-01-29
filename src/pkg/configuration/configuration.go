@@ -5,9 +5,6 @@ import (
 	"log/slog"
 	"time"
 
-	"crypto/x509"
-	"encoding/pem"
-
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/common/auth"
 )
@@ -26,6 +23,7 @@ const (
 	DEFAULT_LOGLEVEL  string = "INFO"
 
 	// Scheduler
+	NULL_SCHEDULER     string = "nullscheduler"
 	ANYKEYNL_SCHEDULER string = "anykeynl"
 )
 
@@ -33,7 +31,7 @@ const (
 // Configuration is responsible for validating and storing any configuration related
 // variables. Default configurations should be set here.
 type Configuration struct {
-	Timezone           *time.Location               // Timezone to run script against
+	timezone           *time.Location               // Timezone to run script against
 	region             string                       // Region to run script on (Optional)
 	tagNamespace       string                       // Tag Namespace to use, default Schedule
 	schedule           string                       // Scheduler type
@@ -108,7 +106,7 @@ func NewConfiguration(logLevel string,
 	}
 
 	o := Configuration{
-		Timezone:           time.Local,
+		timezone:           time.Local,
 		region:             region,
 		tagNamespace:       tagNamespace,
 		schedule:           ANYKEYNL_SCHEDULER,
@@ -123,23 +121,23 @@ func NewConfiguration(logLevel string,
 }
 
 // Region returns the default configured region
-func (c *Configuration) Region() string {
-	return c.region
+func (c *Configuration) Region() *string {
+	return &c.region
 }
 
 // TagNamespace returns the configured tag namespace
-func (c *Configuration) TagNamespace() string {
-	return c.tagNamespace
+func (c *Configuration) TagNamespace() *string {
+	return &c.tagNamespace
 }
 
 // Action returns the configured action [UP, DOWN, ALL]
-func (c *Configuration) Action() string {
-	return c.action
+func (c *Configuration) Action() *string {
+	return &c.action
 }
 
 // AuthType returns the configured authentication type
-func (c *Configuration) AuthType() string {
-	return c.principal
+func (c *Configuration) AuthType() *string {
+	return &c.principal
 }
 
 // Provider returns the default configured provider
@@ -147,54 +145,22 @@ func (c *Configuration) Provider() common.ConfigurationProvider {
 	return c.provider
 }
 
-// ForRegion returns a modified configuration provider for the selected region
-func (c *Configuration) ForRegion(region string) (common.ConfigurationProvider, error) {
-	// Only API key auth needs a new provider with a different region.
-	if c.principal == APIKEY {
-		tenant, err := c.provider.TenancyOCID()
-		if err != nil {
-			return nil, err
-		}
-
-		user, err := c.provider.UserOCID()
-		if err != nil {
-			return nil, err
-		}
-
-		fp, err := c.provider.KeyFingerprint()
-		if err != nil {
-			return nil, err
-		}
-
-		// Get the RSA key and convert to PEM string expected by NewRawConfigurationProvider
-		pk, err := c.provider.PrivateRSAKey()
-		if err != nil {
-			return nil, err
-		}
-		pemBytes := pem.EncodeToMemory(&pem.Block{
-			Type:  "RSA PRIVATE KEY",
-			Bytes: x509.MarshalPKCS1PrivateKey(pk),
-		})
-
-		return common.NewRawConfigurationProvider(
-			tenant,
-			user,
-			region,
-			fp,
-			string(pemBytes),
-			c.privateKeyPassword,
-		), nil
-	}
-
-	// For non-API key principals (instance/resource/workload), return the existing provider.
-	// Region is derived by the underlying environment and typically cannot be overridden here.
-	return c.provider, nil
+// ScheduleType returns of the type of scheduler in use
+func (c *Configuration) ScheduleType() *string {
+	return &c.schedule
 }
 
-func (c *Configuration) Schedule() string {
-	return c.schedule
+// SetTimezone sets the configured time zone
+func (c *Configuration) SetTimezone(tz *time.Location) {
+	c.timezone = tz
 }
 
+// Timezone returns current time zone or default local timezone
+func (c *Configuration) Timezone() *time.Location {
+	return c.timezone
+}
+
+// MakeLog creates a logger with common attributes v[i], v[i+1]
 func (c *Configuration) MakeLog(v ...any) *slog.Logger {
 	return c.logFunc(v...)
 }

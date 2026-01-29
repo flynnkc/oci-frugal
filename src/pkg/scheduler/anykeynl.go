@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/flynnkc/oci-frugal/src/pkg/configuration"
 )
 
 var (
@@ -101,6 +103,11 @@ func (ts *AnykeyNLScheduler) SetLocation(loc *time.Location) (Scheduler, error) 
 	}
 
 	return NewAnykeyNLSchedulerWithLocation(loc), nil
+}
+
+// Type returns the scheduler type
+func (ts *AnykeyNLScheduler) Type() string {
+	return configuration.ANYKEYNL_SCHEDULER
 }
 
 func (ts AnykeyNLScheduler) parseSchedule(sch string, hour int) (Action, error) {

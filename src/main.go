@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/flynnkc/oci-frugal/src/pkg/configuration"
@@ -107,7 +108,7 @@ func main() {
 					"err", err)
 				os.Exit(2)
 			} else {
-				cfg.Timezone = tz
+				cfg.SetTimezone(tz)
 			}
 		}
 	}
@@ -120,7 +121,7 @@ func main() {
 		"Principal", cfg.AuthType(),
 		"Scheduler", configuration.ANYKEYNL_SCHEDULER,
 		"Action", cfg.Action(),
-		"Timezone", cfg.Timezone)
+		"Timezone", cfg.Timezone())
 
 	run(cfg)
 }
@@ -159,23 +160,33 @@ func run(cfg *configuration.Configuration) {
 			"Regions", regions)
 	}
 
-	schFunc := scheduler.ScheduleFunc(cfg.Schedule())
+	schFunc := scheduler.ScheduleFunc(*cfg.ScheduleType())
 	sch := schFunc()
 
 	// Main control loop
-	for i, r := range regions {
-		log.Info("BEGIN SCALING IN NEW REGION",
-			"Region", r,
+	lc := len(regions)
+	var wg sync.WaitGroup
+	for i, region := range regions {
+		log.Info("BEGIN SCALING IN REGION",
+			"Region", region,
 			"Order", i,
-			"Region Count", len(regions))
+			"Region Count", lc)
 
-		provider := cfg.Provider()
-		controller, err := controller.NewTagController(provider, cfg.TagNamespace())
+		controllerOpts := controller.ControllerOpts{
+			ConfigurationProvider: cfg.Provider(),
+			TagNamespace:          cfg.TagNamespace(),
+			Scheduler:             sch,
+			Log: cfg.MakeLog(
+				"Component", "Controller",
+				"Region", region),
+		}
+
+		controller, err := controller.NewTagController(controllerOpts)
 		if err != nil {
 			log.Error("Unable to create controller",
 				"error", err)
 		}
-		controller.SetScheduler(sch)
-		controller.Run()
+		controller.SetRegion(region)
+		controller.Run(&wg)
 	}
 }
