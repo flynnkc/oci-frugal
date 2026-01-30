@@ -187,6 +187,8 @@ func run(cfg *configuration.Configuration) {
 				"error", err)
 		}
 		controller.SetRegion(region)
-		controller.Run(&wg)
+		go controller.Run(&wg)
+		wg.Add(1)
 	}
+	wg.Wait()
 }

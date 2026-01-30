@@ -2,13 +2,11 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"strconv"
 	"sync"
+	"time"
 
 	"github.com/flynnkc/oci-frugal/src/pkg/controller/handlers"
-	"github.com/flynnkc/oci-frugal/src/pkg/controller/task"
 	"github.com/flynnkc/oci-frugal/src/pkg/scheduler"
 	"github.com/oracle/oci-go-sdk/v65/analytics"
 	"github.com/oracle/oci-go-sdk/v65/common"
@@ -19,19 +17,22 @@ import (
 )
 
 const (
-	query string = "query instance, dbsystem, autonomousdatabase, analyticsinstance, integrationinstance resources"
+	QUERY         string = "query instance, dbsystem, autonomousdatabase, analyticsinstance, integrationinstance resources"
+	TC_WORK_QUEUE uint8  = 16
+	TC_TIMEOUT           = 5 * time.Second
 )
 
 // TagController keeps track of all clients and scheduler interface for managing
 // access, decisions, and actions on resources. Uses tags to manage schedules.
 type TagController struct {
+	tagNamespace string
+	region       string
 	scheduler    scheduler.Scheduler
 	compute      core.ComputeClient
 	database     database.DatabaseClient
 	analytics    analytics.AnalyticsClient
 	integration  integration.IntegrationInstanceClient
 	search       rs.ResourceSearchClient
-	tagNamespace string
 	log          *slog.Logger
 }
 
@@ -39,20 +40,25 @@ type TagController struct {
 // If any clients fail to initialze, return nil controller and error.
 func NewTagController(opts ControllerOpts) (*TagController, error) {
 	// Verify required variables
-	if opts.TagNamespace == nil || opts.ConfigurationProvider == nil {
+	if opts.TagNamespace == nil || opts.ConfigurationProvider == nil ||
+		opts.Region == nil {
 		return nil, ErrControllerOptions
 	}
 
 	c := TagController{
 		tagNamespace: *opts.TagNamespace,
+		region:       *opts.Region,
 	}
 
-	// Prefer an expicit log
+	// Prefer an expicit log but set default log if needed
 	if opts.Log != nil {
 		c.log = opts.Log
 	} else {
 		c.log = slog.Default()
 	}
+
+	// Create various resource clients
+	// Compute
 	instance, err := core.NewComputeClientWithConfigurationProvider(
 		opts.ConfigurationProvider)
 	if err != nil {
@@ -60,6 +66,7 @@ func NewTagController(opts ControllerOpts) (*TagController, error) {
 	}
 	c.compute = instance
 
+	// Database
 	db, err := database.NewDatabaseClientWithConfigurationProvider(
 		opts.ConfigurationProvider)
 	if err != nil {
@@ -67,6 +74,7 @@ func NewTagController(opts ControllerOpts) (*TagController, error) {
 	}
 	c.database = db
 
+	// Analytics Cloud
 	analytics, err := analytics.NewAnalyticsClientWithConfigurationProvider(
 		opts.ConfigurationProvider)
 	if err != nil {
@@ -74,6 +82,7 @@ func NewTagController(opts ControllerOpts) (*TagController, error) {
 	}
 	c.analytics = analytics
 
+	// Integration Cloud
 	i, err := integration.NewIntegrationInstanceClientWithConfigurationProvider(
 		opts.ConfigurationProvider)
 	if err != nil {
@@ -81,6 +90,7 @@ func NewTagController(opts ControllerOpts) (*TagController, error) {
 	}
 	c.integration = i
 
+	// Resource Search
 	s, err := rs.NewResourceSearchClientWithConfigurationProvider(
 		opts.ConfigurationProvider)
 	if err != nil {
@@ -117,14 +127,19 @@ func (tc *TagController) Search(query string) (rs.ResourceSummaryCollection, err
 		Query: common.String(query),
 	}
 
+	// Return as many results in each result to minimize number of requests required
 	request := rs.SearchResourcesRequest{
 		SearchDetails: details,
 		Limit:         common.Int(1000),
 	}
 
+	// Set context via wrapping SearchResources
 	searchFunc := func(request rs.SearchResourcesRequest) (rs.SearchResourcesResponse,
 		error) {
-		return tc.search.SearchResources(context.Background(), request)
+		ctx, cancel := context.WithTimeout(context.Background(), TC_TIMEOUT)
+		defer cancel()
+
+		return tc.search.SearchResources(ctx, request)
 	}
 
 	// Pagination by breaking when no next page
@@ -145,8 +160,7 @@ func (tc *TagController) Search(query string) (rs.ResourceSummaryCollection, err
 			break
 		}
 	}
-	tc.log.Debug("finished search",
-		slog.Int("num results", len(rsc.Items)))
+	tc.log.Debug("finished search")
 
 	return rsc, nil
 }
@@ -160,65 +174,63 @@ func (tc *TagController) SetRegion(region string) {
 }
 
 // Run starts the controller spawning workers and queuing tasks
-func (tc *TagController) Run(wait *sync.WaitGroup) {
+func (tc *TagController) Run(controlWg *sync.WaitGroup) {
+	defer controlWg.Done()
 	tc.log.Info("Beginning TagController Run")
-	var wg sync.WaitGroup
 
-	// Search query where clause
-	where := "where definedTags.Namespace = '%s'"
+	// Search for supported resource types
+	collection, err := tc.Search(QUERY)
+	if err != nil {
+		tc.log.Error("error searching for resources",
+			slog.String("error", err.Error()))
+		return
+	}
+	tc.log.Debug("items received from search",
+		slog.Int("count", len(collection.Items)))
 
-	// Hold resources found by search
-	items := make([]rs.ResourceSummary, 0)
+	// Make control objects, taskschannel for resources and WaitGroup to sync workers
+	// with controller
+	tasks := make(chan rs.ResourceSummary, TC_WORK_QUEUE)
+	var workerWg sync.WaitGroup
 
-	// Channels for tasks and results
-	tasks := make(chan task.Task, numWorkers)
-
-	rsc, err := tc.Search(fmt.Sprintf(query+where, tc.tagNamespace))
-	tc.log.Error("error in search",
-		"error", err,
-		"items returned", strconv.Itoa(len(rsc.Items)))
-	items = append(items, rsc.Items...)
-
-	// Start workers
-	for range numWorkers {
-		wg.Add(1)
-		go func(tasks <-chan task.Task) {
-			defer wg.Done()
-			for {
-				t, more := <-tasks
-				if !more {
-					return
-				}
-
-				switch *t.Resource.ResourceType {
-				case "instance":
-					handlers.HandleCompute(t)
-				default:
-					tc.log.Warn("Unknown type detected",
-						"type", *t.Resource.ResourceType)
-				}
-			}
-		}(tasks)
+	// Create workers
+	for i := range TC_WORK_QUEUE {
+		go tc.worker(i, tasks, &workerWg)
+		workerWg.Add(1)
 	}
 
-	// Send tasks
-	for _, t := range items {
-		// Evaluate results
-		action, err := tc.scheduler.Evaluate(
-			t.DefinedTags[tc.tagNamespace])
-		if err != nil {
-			slog.Error("error evaluating schedule",
-				"error", err)
-			continue
-		} else if action == scheduler.NULL_ACTION {
-			continue
-		}
-
-		tasks <- task.Task{Action: action, Resource: t}
+	// Add items to tasks queue
+	for _, item := range collection.Items {
+		tasks <- item
 	}
 
-	tc.log.Info("Finished compute")
+	// Send close signal to workers once out of items and wait for workers to finish
 	close(tasks)
+	workerWg.Wait()
+}
 
-	wg.Wait()
+func (tc *TagController) worker(id uint8, tasks <-chan rs.ResourceSummary,
+	wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	// Log attribute to identify worker
+	logGroup := slog.Group("Worker",
+		slog.Int("Worker ID", int(id)))
+	tc.log.Info("Started Worker", logGroup)
+
+	for {
+		if task, more := <-tasks; more {
+			tc.log.Info("Handling Resource", logGroup,
+				slog.String("Resource ID", *task.Identifier),
+				slog.String("Type", *task.ResourceType))
+
+			switch *task.ResourceType {
+			case "instance":
+				handlers.HandleCompute(task)
+			}
+		} else {
+			tc.log.Info("Work finished", logGroup)
+			return
+		}
+	}
 }
