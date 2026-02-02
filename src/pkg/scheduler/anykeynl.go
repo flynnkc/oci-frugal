@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/flynnkc/oci-frugal/src/pkg/action"
 	"github.com/flynnkc/oci-frugal/src/pkg/configuration"
 )
 
@@ -61,11 +62,11 @@ func NewAnykeyNLSchedulerWithLocation(loc *time.Location) *AnykeyNLScheduler {
 
 // Evaluate determines an action to take on the resource. Input must be of type
 // map[string]string.
-func (ts AnykeyNLScheduler) Evaluate(tags any) (Action, error) {
+func (ts AnykeyNLScheduler) Evaluate(tags any) (action.Action, error) {
 
 	t, ok := tags.(map[string]string)
 	if !ok {
-		return NULL_ACTION, ErrInvalidInput
+		return action.NULL_ACTION, ErrInvalidInput
 	}
 
 	// Is today the day of the week?
@@ -93,7 +94,7 @@ func (ts AnykeyNLScheduler) Evaluate(tags any) (Action, error) {
 	}
 
 	// No match, no action
-	return NULL_ACTION, nil
+	return action.NULL_ACTION, nil
 }
 
 // SetLocation changes the timezone of the scheduler
@@ -110,9 +111,10 @@ func (ts *AnykeyNLScheduler) Type() string {
 	return configuration.ANYKEYNL_SCHEDULER
 }
 
-func (ts AnykeyNLScheduler) parseSchedule(sch string, hour int) (Action, error) {
+func (ts AnykeyNLScheduler) parseSchedule(sch string, hour int) (action.Action,
+	error) {
 	// Default: null action
-	act := NULL_ACTION
+	act := action.NULL_ACTION
 
 	// Empty or whitespace-only schedule
 	sch = strings.TrimSpace(sch)
@@ -149,15 +151,15 @@ func (ts AnykeyNLScheduler) parseSchedule(sch string, hour int) (Action, error) 
 	// Backward-compatible mapping and safety clamp for Action(int8)
 	switch {
 	case wantInt <= 0:
-		act = OFF
+		act = action.OFF
 	case wantInt == 1:
-		act = ON
+		act = action.ON
 	default:
 		// Clamp to int8 max to avoid overflow
 		if wantInt > 127 {
 			wantInt = 127
 		}
-		act = Action(int8(wantInt))
+		act = action.ToAction(wantInt)
 	}
 
 	return act, nil

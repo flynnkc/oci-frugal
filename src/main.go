@@ -7,7 +7,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/flynnkc/oci-frugal/src/pkg/configuration"
 	"github.com/flynnkc/oci-frugal/src/pkg/controller"
@@ -16,24 +15,20 @@ import (
 )
 
 const (
-	ENVPREFIX    string = "FRUGAL_"
+	// Environment variables
+	PREFIX       string = "FRUGAL_"
 	ACTIONTYPE   string = "ACTION_TYPE"
 	LOGLEVEL     string = "LOG_LEVEL"
 	REGION       string = "REGION"
 	PRINCIPAL    string = "AUTH_TYPE"
+	FILE         string = "FILE"
+	PROFILE      string = "PROFILE"
+	KEYPASS      string = "KEY_PASS"
 	TAGNAMESPACE string = "TAG_NAMESPACE"
 	TIMEZONE     string = "TIMEZONE"
 )
 
 var (
-	// Authentication variables
-	authType      string
-	configFile    string
-	configProfile string
-
-	region   string         // Region to run script against
-	timezone *time.Location // Timezone script runs in/as
-
 	services []string = []string{ // Supported services to be managed by the script
 		"instance",
 		"dbsystem",
@@ -43,79 +38,20 @@ var (
 	}
 )
 
-func init() {
-	usage := fmt.Sprintf("authentication type to use [%s, %s, %s, %s]",
-		configuration.APIKEY,
-		configuration.INSTANCEPRINCIPAL,
-		configuration.RESOURCEPRINCIPAL,
-		configuration.WORKLOADPRINCIPAL)
-	flag.StringVar(&authType, "auth", "", usage)
-	flag.StringVar(&region, "region", "", "region to run frugal on")
-	flag.StringVar(&region, "r", "", "region to run frugal on (shorthand)")
-	flag.StringVar(&configFile, "config", "", "OCI configuration file location")
-	flag.StringVar(&configProfile, "profile", "", "OCI configuration file profile")
-}
-
 func main() {
-	flag.Func("tz", "Timezone in a common format [ex. America/New York]",
-		func(s string) error {
-			tz, err := time.LoadLocation(s)
-			if err != nil {
-				return err
-			}
-			timezone = tz
-			return nil
-		})
-	keyPass := flag.String("pass", "", "private key password for API Key Authentication")
-	flag.Parse()
+	cfgOpts := setup()
 
-	logLevel := os.Getenv(fmt.Sprintf("%s%s", ENVPREFIX, LOGLEVEL))
-	action := os.Getenv(fmt.Sprintf("%s%s", ENVPREFIX, ACTIONTYPE))
-	tagNamespace := os.Getenv(fmt.Sprintf("%s%s", ENVPREFIX, TAGNAMESPACE))
-
-	// Flags take priority over environment variables
-	if authType == "" {
-		if val, ok := os.LookupEnv(fmt.Sprintf("%s%s", ENVPREFIX, PRINCIPAL)); ok {
-			authType = val
-		}
-	}
-
-	if region == "" {
-		if val, ok := os.LookupEnv(fmt.Sprintf("%s%s", ENVPREFIX, REGION)); ok {
-			region = val
-		}
-	}
-
-	cfg, err := configuration.NewConfiguration(
-		logLevel,
-		action,
-		authType,
-		configFile,
-		configProfile,
-		tagNamespace,
-		keyPass)
+	cfg, err := configuration.NewConfiguration(cfgOpts)
 	if err != nil {
 		slog.Default().Error("error loading configuration: %w", "err", err)
 		os.Exit(1)
 	}
 
 	log := cfg.MakeLog("Component", "main")
-	if timezone == nil {
-		if val, ok := os.LookupEnv(fmt.Sprintf("%s%s", ENVPREFIX, TIMEZONE)); ok {
-			tz, err := time.LoadLocation(val)
-			if err != nil {
-				log.Error("error loading timezone from environment",
-					"err", err)
-				os.Exit(2)
-			} else {
-				cfg.SetTimezone(tz)
-			}
-		}
-	}
 
 	log.Info("Frugal started...")
 	log.Debug("Frugal initialized with the following settings",
-		"Log Level", logLevel,
+		"Log Level", *cfgOpts.LogLevel,
 		"Region", cfg.Region(),
 		"Tag Namespace", cfg.TagNamespace(),
 		"Principal", cfg.AuthType(),
@@ -133,8 +69,8 @@ func run(cfg *configuration.Configuration) {
 
 	// Set region based on flag/environment variable
 	var regions []string
-	if region != "" {
-		regions = append(regions, region)
+	if *cfg.Region() != "" {
+		regions = append(regions, *cfg.Region())
 		log.Debug("Region specified in flags, not retrieving subscribed regions",
 			"Region", regions[0])
 	} else {
@@ -191,4 +127,123 @@ func run(cfg *configuration.Configuration) {
 		wg.Add(1)
 	}
 	wg.Wait()
+}
+
+func setup() configuration.ConfigurationOpts {
+	c := configuration.ConfigurationOpts{}
+	// Add flag variables as first priority
+	c = addFlags(c)
+	// Add environment variables next
+	c = addEnvironment(c)
+
+	return c
+}
+
+func addFlags(c configuration.ConfigurationOpts) configuration.ConfigurationOpts {
+	opts := c
+
+	// TimeZone func
+	flag.Func("tz", "Timezone in a common format [ex. America/New York]",
+		func(s string) error {
+			opts.Timezone = &s
+			return nil
+		})
+	// Actions funcs
+	flag.Func("action", "Action(s) to take on matching resources [all, on, off]",
+		func(s string) error {
+			opts.Action = &s
+			return nil
+		})
+
+	// Authentication type
+	authHelp := fmt.Sprintf("authentication type to use [%s, %s, %s, %s]",
+		configuration.APIKEY,
+		configuration.INSTANCEPRINCIPAL,
+		configuration.RESOURCEPRINCIPAL,
+		configuration.WORKLOADPRINCIPAL)
+	flag.Func("auth", authHelp, func(s string) error {
+		opts.Principal = &s
+		return nil
+	})
+
+	// Region
+	flag.Func("region", "region to run frugal on", func(s string) error {
+		opts.Region = &s
+		return nil
+	})
+
+	// Config File
+	flag.Func("config-file", "OCI configuration file to use", func(s string) error {
+		opts.ConfigFile = &s
+		return nil
+	})
+
+	// Config Profile
+	flag.Func("profiile", "OCI configuration profile to use", func(s string) error {
+		opts.ConfigProfile = &s
+		return nil
+	})
+
+	// Private Key Password
+	flag.Func("key-pass", "password for private key linked to OCI config",
+		func(s string) error {
+			opts.KeyPassword = &s
+			return nil
+		})
+
+	// Log Level
+	flag.Func("v", "level to set logs", func(s string) error {
+		opts.LogLevel = &s
+		return nil
+	})
+
+	flag.Parse()
+
+	return opts
+}
+
+func addEnvironment(c configuration.ConfigurationOpts) configuration.ConfigurationOpts {
+	opts := c
+
+	if opts.Timezone == nil {
+		opts.Timezone = checkEnv(PREFIX + TIMEZONE)
+	}
+
+	if opts.Action == nil {
+		opts.Action = checkEnv(PREFIX + ACTIONTYPE)
+	}
+
+	if opts.Principal == nil {
+		opts.Principal = checkEnv(PREFIX + PRINCIPAL)
+	}
+
+	if opts.Region == nil {
+		opts.Region = checkEnv(PREFIX + REGION)
+	}
+
+	if opts.ConfigFile == nil {
+		opts.ConfigFile = checkEnv(PREFIX + FILE)
+	}
+
+	if opts.ConfigProfile == nil {
+		opts.ConfigProfile = checkEnv(PREFIX + PROFILE)
+	}
+
+	if opts.KeyPassword == nil {
+		opts.KeyPassword = checkEnv(PREFIX + KEYPASS)
+	}
+
+	if opts.LogLevel == nil {
+		opts.LogLevel = checkEnv(PREFIX + LOGLEVEL)
+	}
+
+	return opts
+}
+
+func checkEnv(key string) *string {
+	if v, ok := os.LookupEnv(key); ok {
+		return &v
+	}
+
+	return nil
 }
