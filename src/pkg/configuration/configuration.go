@@ -41,6 +41,7 @@ type Configuration struct {
 	provider           common.ConfigurationProvider // Tag Namespace to use, default Schedule
 	privateKeyPassword *string
 	logFunc            func(...any) *slog.Logger
+	logLevel           string
 }
 
 type ConfigurationOpts struct {
@@ -59,6 +60,7 @@ func NewConfiguration(opts ConfigurationOpts) (*Configuration, error) {
 	// Log variables
 	var logFunc LogFunc
 	if opts.LogLevel == nil {
+		opts.LogLevel = common.String("INFO")
 		logFunc = StdTextLoggerInfo
 	} else {
 		switch strings.ToLower(*opts.LogLevel) {
@@ -92,15 +94,19 @@ func NewConfiguration(opts ConfigurationOpts) (*Configuration, error) {
 	}
 
 	var act action.Action
-	switch strings.ToLower(*opts.Action) {
-	case "all":
+	if opts.Action == nil {
 		act = action.ALL
-	case "on":
-		act = action.ON
-	case "off":
-		act = action.OFF
-	default:
-		act = action.ALL
+	} else {
+		switch strings.ToLower(*opts.Action) {
+		case "all":
+			act = action.ALL
+		case "on":
+			act = action.ON
+		case "off":
+			act = action.OFF
+		default:
+			act = action.ALL
+		}
 	}
 
 	// Authentication variables
@@ -108,13 +114,18 @@ func NewConfiguration(opts ConfigurationOpts) (*Configuration, error) {
 		opts.ConfigFile = common.String("~/.oci/config")
 	}
 
-	if opts.ConfigFile == nil {
-		opts.ConfigFile = common.String("DEFAULT")
+	if opts.ConfigProfile == nil {
+		opts.ConfigProfile = common.String("DEFAULT")
+	}
+
+	if opts.KeyPassword == nil {
+		opts.KeyPassword = common.String("")
 	}
 
 	var provider common.ConfigurationProvider
 	var err error
 	if opts.Principal == nil {
+		opts.Principal = common.String(APIKEY)
 		provider, err = common.ConfigurationProviderFromFileWithProfile(
 			*opts.ConfigFile,
 			*opts.ConfigProfile,
@@ -140,12 +151,9 @@ func NewConfiguration(opts ConfigurationOpts) (*Configuration, error) {
 	}
 
 	// Define region
+	// Blank will cause all regions to be searched
 	if opts.Region == nil {
-		region, err := provider.Region()
-		if err != nil {
-			return nil, fmt.Errorf("error getting region from provider: %w", err)
-		}
-		opts.Region = common.String(region)
+		opts.Region = common.String("")
 	}
 
 	o := Configuration{
@@ -158,6 +166,7 @@ func NewConfiguration(opts ConfigurationOpts) (*Configuration, error) {
 		provider:           provider,
 		privateKeyPassword: opts.KeyPassword,
 		logFunc:            logFunc,
+		logLevel:           *opts.LogLevel,
 	}
 
 	return &o, nil
@@ -201,4 +210,8 @@ func (c *Configuration) Timezone() *time.Location {
 // MakeLog creates a logger with common attributes v[i], v[i+1]
 func (c *Configuration) MakeLog(v ...any) *slog.Logger {
 	return c.logFunc(v...)
+}
+
+func (c *Configuration) LogLevel() string {
+	return c.logLevel
 }

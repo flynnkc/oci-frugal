@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/flynnkc/oci-frugal/src/pkg/action"
 	"github.com/flynnkc/oci-frugal/src/pkg/controller/handlers"
 	"github.com/flynnkc/oci-frugal/src/pkg/scheduler"
 	"github.com/oracle/oci-go-sdk/v65/analytics"
@@ -28,6 +29,7 @@ type TagController struct {
 	tagNamespace string
 	region       string
 	scheduler    scheduler.Scheduler
+	action       action.Action
 	compute      core.ComputeClient
 	database     database.DatabaseClient
 	analytics    analytics.AnalyticsClient
@@ -40,14 +42,13 @@ type TagController struct {
 // If any clients fail to initialze, return nil controller and error.
 func NewTagController(opts ControllerOpts) (*TagController, error) {
 	// Verify required variables
-	if opts.TagNamespace == nil || opts.ConfigurationProvider == nil ||
-		opts.Region == nil {
+	if opts.TagNamespace == nil || opts.ConfigurationProvider == nil {
 		return nil, ErrControllerOptions
 	}
 
 	c := TagController{
 		tagNamespace: *opts.TagNamespace,
-		region:       *opts.Region,
+		action:       opts.SupportedActions,
 	}
 
 	// Prefer an expicit log but set default log if needed
@@ -75,12 +76,12 @@ func NewTagController(opts ControllerOpts) (*TagController, error) {
 	c.database = db
 
 	// Analytics Cloud
-	analytics, err := analytics.NewAnalyticsClientWithConfigurationProvider(
+	a, err := analytics.NewAnalyticsClientWithConfigurationProvider(
 		opts.ConfigurationProvider)
 	if err != nil {
 		return nil, err
 	}
-	c.analytics = analytics
+	c.analytics = a
 
 	// Integration Cloud
 	i, err := integration.NewIntegrationInstanceClientWithConfigurationProvider(
@@ -145,9 +146,14 @@ func (tc *TagController) Search(query string) (rs.ResourceSummaryCollection, err
 	// Pagination by breaking when no next page
 	tc.log.Debug("preparing to send search requests")
 	for r, err := searchFunc(request); ; r, err = searchFunc(request) {
-		tc.log.Debug("search response",
-			slog.Int("status", r.RawResponse.StatusCode),
-			slog.String("next page", *r.OpcNextPage))
+		if r.OpcNextPage != nil {
+			tc.log.Debug("search response",
+				slog.Int("status", r.RawResponse.StatusCode),
+				slog.String("next page", *r.OpcNextPage))
+		} else {
+			tc.log.Debug("search response",
+				slog.Int("status", r.RawResponse.StatusCode))
+		}
 		if err != nil {
 			return rsc, err
 		}
@@ -219,14 +225,27 @@ func (tc *TagController) worker(id uint8, tasks <-chan rs.ResourceSummary,
 	tc.log.Info("Started Worker", logGroup)
 
 	for {
-		if task, more := <-tasks; more {
-			tc.log.Info("Handling Resource", logGroup,
-				slog.String("Resource ID", *task.Identifier),
-				slog.String("Type", *task.ResourceType))
+		if item, more := <-tasks; more {
+			itemGroup := slog.Group("Resource", logGroup,
+				slog.String("Identifier", *item.Identifier),
+				slog.String("Type", *item.ResourceType))
+			tc.log.Info("Handling Resource", itemGroup)
 
-			switch *task.ResourceType {
-			case "instance":
-				handlers.HandleCompute(task)
+			tags := item.DefinedTags[tc.tagNamespace]
+			act, err := tc.scheduler.Evaluate(tags)
+			if err != nil {
+				tc.log.Warn("error evaluating resource", itemGroup,
+					"error", err)
+			} else if act == action.NULL_ACTION {
+				tc.log.Info("No action required", logGroup, itemGroup)
+				continue
+			}
+
+			switch *item.ResourceType {
+			case "Instance":
+				handlers.HandleCompute(item)
+			default:
+				tc.log.Error("Unsupported resource type", logGroup, itemGroup)
 			}
 		} else {
 			tc.log.Info("Work finished", logGroup)

@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/flynnkc/oci-frugal/src/pkg/configuration"
 	"github.com/flynnkc/oci-frugal/src/pkg/controller"
@@ -51,7 +52,7 @@ func main() {
 
 	log.Info("Frugal started...")
 	log.Debug("Frugal initialized with the following settings",
-		"Log Level", *cfgOpts.LogLevel,
+		"Log Level", cfg.LogLevel(),
 		"Region", cfg.Region(),
 		"Tag Namespace", cfg.TagNamespace(),
 		"Principal", cfg.AuthType(),
@@ -63,6 +64,7 @@ func main() {
 }
 
 func run(cfg *configuration.Configuration) {
+	startTime := time.Now()
 	log := cfg.MakeLog("Component", "run")
 
 	log.Info("Supported Services", "Services", strings.Join(services, ", "))
@@ -82,7 +84,7 @@ func run(cfg *configuration.Configuration) {
 			os.Exit(1)
 		}
 
-		regions, err := idClient.GetRegions()
+		regions, err = idClient.GetRegions()
 		if err != nil {
 			log.Error("error getting regions",
 				"error", err)
@@ -112,6 +114,7 @@ func run(cfg *configuration.Configuration) {
 			ConfigurationProvider: cfg.Provider(),
 			TagNamespace:          cfg.TagNamespace(),
 			Scheduler:             sch,
+			SupportedActions:      *cfg.Action(),
 			Log: cfg.MakeLog(
 				"Component", "Controller",
 				"Region", region),
@@ -127,6 +130,9 @@ func run(cfg *configuration.Configuration) {
 		wg.Add(1)
 	}
 	wg.Wait()
+
+	log.Info("Finished tasks",
+		"duration", time.Since(startTime))
 }
 
 func setup() configuration.ConfigurationOpts {

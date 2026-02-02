@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/flynnkc/oci-frugal/src/pkg/action"
 	"github.com/flynnkc/oci-frugal/src/pkg/scheduler"
 	"github.com/oracle/oci-go-sdk/v65/common"
 )
@@ -21,9 +22,11 @@ type Controller interface {
 // Options to provide controllers to define behavior. Controller should define
 // required and optional attributes.
 type ControllerOpts struct {
+	WaitGroup             *sync.WaitGroup
 	ConfigurationProvider common.ConfigurationProvider
 	TagNamespace          *string
 	Region                *string
 	Scheduler             scheduler.Scheduler
+	SupportedActions      action.Action
 	Log                   *slog.Logger
 }
