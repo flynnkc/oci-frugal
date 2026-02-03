@@ -65,7 +65,7 @@ func main() {
 
 func run(cfg *configuration.Configuration) {
 	startTime := time.Now()
-	log := cfg.MakeLog("Component", "run")
+	log := cfg.MakeLog("Component", "Main")
 
 	log.Info("Supported Services", "Services", strings.Join(services, ", "))
 

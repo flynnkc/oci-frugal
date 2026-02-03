@@ -1,17 +1,10 @@
 package scheduler
 
 import (
-	"errors"
 	"time"
 
 	"github.com/flynnkc/oci-frugal/src/pkg/action"
 	"github.com/flynnkc/oci-frugal/src/pkg/configuration"
-)
-
-var (
-	ErrInvalidInput    error = errors.New("error invalid input in scheduler")
-	ErrNoScheduler     error = errors.New("error no scheduler set")
-	ErrInvalidTimezone error = errors.New("error invalid timezone set")
 )
 
 // Scheduler is an interface for anything that can evaluate a resource and return

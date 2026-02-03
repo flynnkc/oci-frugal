@@ -66,7 +66,7 @@ func (ts AnykeyNLScheduler) Evaluate(tags any) (action.Action, error) {
 
 	t, ok := tags.(map[string]string)
 	if !ok {
-		return action.NULL_ACTION, ErrInvalidInput
+		return action.NULL_ACTION, ErrInvalidInput{Input: t}
 	}
 
 	// Is today the day of the week?

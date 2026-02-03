@@ -19,7 +19,7 @@ import (
 
 const (
 	QUERY         string = "query instance, dbsystem, autonomousdatabase, analyticsinstance, integrationinstance resources"
-	TC_WORK_QUEUE uint8  = 16
+	TC_WORK_QUEUE uint8  = 8
 	TC_TIMEOUT           = 5 * time.Second
 )
 
@@ -146,6 +146,9 @@ func (tc *TagController) Search(query string) (rs.ResourceSummaryCollection, err
 	// Pagination by breaking when no next page
 	tc.log.Debug("preparing to send search requests")
 	for r, err := searchFunc(request); ; r, err = searchFunc(request) {
+		if err != nil {
+			return rsc, err
+		}
 		if r.OpcNextPage != nil {
 			tc.log.Debug("search response",
 				slog.Int("status", r.RawResponse.StatusCode),
@@ -153,9 +156,6 @@ func (tc *TagController) Search(query string) (rs.ResourceSummaryCollection, err
 		} else {
 			tc.log.Debug("search response",
 				slog.Int("status", r.RawResponse.StatusCode))
-		}
-		if err != nil {
-			return rsc, err
 		}
 
 		rsc.Items = append(rsc.Items, r.Items...)
@@ -196,26 +196,26 @@ func (tc *TagController) Run(controlWg *sync.WaitGroup) {
 
 	// Make control objects, taskschannel for resources and WaitGroup to sync workers
 	// with controller
-	tasks := make(chan rs.ResourceSummary, TC_WORK_QUEUE)
+	resources := make(chan rs.ResourceSummary, TC_WORK_QUEUE)
 	var workerWg sync.WaitGroup
 
 	// Create workers
 	for i := range TC_WORK_QUEUE {
-		go tc.worker(i, tasks, &workerWg)
+		go tc.worker(i, resources, &workerWg)
 		workerWg.Add(1)
 	}
 
 	// Add items to tasks queue
 	for _, item := range collection.Items {
-		tasks <- item
+		resources <- item
 	}
 
 	// Send close signal to workers once out of items and wait for workers to finish
-	close(tasks)
+	close(resources)
 	workerWg.Wait()
 }
 
-func (tc *TagController) worker(id uint8, tasks <-chan rs.ResourceSummary,
+func (tc *TagController) worker(id uint8, resources <-chan rs.ResourceSummary,
 	wg *sync.WaitGroup) {
 	defer wg.Done()
 
@@ -225,7 +225,7 @@ func (tc *TagController) worker(id uint8, tasks <-chan rs.ResourceSummary,
 	tc.log.Info("Started Worker", logGroup)
 
 	for {
-		if item, more := <-tasks; more {
+		if item, more := <-resources; more {
 			itemGroup := slog.Group("Resource", logGroup,
 				slog.String("Identifier", *item.Identifier),
 				slog.String("Type", *item.ResourceType))
