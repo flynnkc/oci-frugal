@@ -9,3 +9,10 @@ type Task struct {
 	Action   action.Action
 	Resource rs.ResourceSummary
 }
+
+func NewTask(act action.Action, item rs.ResourceSummary) Task {
+	return Task{
+		Action:   act,
+		Resource: item,
+	}
+}

@@ -28,6 +28,7 @@ const (
 	_ANYDAY  string = "AnyDay"
 	_WEEKDAY string = "WeekDay"
 	_WEEKEND string = "Weekend"
+	_DAYOFMO string = "DayOfMonth"
 )
 
 // AnykeyNL Scheduler inspired by https://github.com/AnykeyNL/OCI-AutoScale and
@@ -35,7 +36,9 @@ const (
 type AnykeyNLScheduler struct {
 	loc  *time.Location
 	hour int
-	day  string
+	dow  string // day of week
+	dom  int    // day of month
+	dnr  int    // nth day within the month (1..5)
 }
 
 // NewAnykeyNLScheduler creates a scheduler using the local system timezone.
@@ -56,45 +59,57 @@ func NewAnykeyNLSchedulerWithLocation(loc *time.Location) *AnykeyNLScheduler {
 	return &AnykeyNLScheduler{
 		loc:  loc,
 		hour: now.Hour(),
-		day:  now.Weekday().String(),
+		dow:  now.Weekday().String(),
+		dom:  now.Day(),
+		dnr:  nthInMonth(now),
 	}
 }
 
 // Evaluate determines an action to take on the resource. Input must be of type
 // map[string]string.
 func (ts AnykeyNLScheduler) Evaluate(tags any) (action.Action, error) {
-
-	t, ok := tags.(map[string]string)
-	if !ok {
-		return action.NULL_ACTION, ErrInvalidInput{Input: t}
+	// Normalize tags into map[string]string
+	t, err := toStringMap(tags)
+	if err != nil {
+		return action.NULL_ACTION, err
 	}
 
-	// Is today the day of the week?
-	if tag, ok := t[ts.day]; ok && strings.TrimSpace(tag) != "" {
-		return ts.parseSchedule(tag, ts.hour)
-	}
+	// Determine the active schedule per AnykeyNL priority (least -> most specific),
+	// with later matches overriding earlier ones:
+	// AnyDay -> WeekDay/Weekend -> Day-of-week -> Nth day-of-week in month -> DayOfMonth
+	active := ""
 
-	// Is today a weekday?
-	if _, ok := _WEEKDAYS[ts.day]; ok {
-		if tag, ok := t[_WEEKDAY]; ok && strings.TrimSpace(tag) != "" {
-			return ts.parseSchedule(tag, ts.hour)
+	if v, ok := t[_ANYDAY]; ok && strings.TrimSpace(v) != "" {
+		active = v
+	}
+	if _, ok := _WEEKDAYS[ts.dow]; ok {
+		if v, ok := t[_WEEKDAY]; ok && strings.TrimSpace(v) != "" {
+			active = v
+		}
+	} else if _, ok := _WEEKENDS[ts.dow]; ok {
+		if v, ok := t[_WEEKEND]; ok && strings.TrimSpace(v) != "" {
+			active = v
+		}
+	}
+	if v, ok := t[ts.dow]; ok && strings.TrimSpace(v) != "" { // exact day name
+		active = v
+	}
+	nthKey := fmt.Sprintf("%s%d", ts.dow, ts.dnr) // e.g., Monday2
+	if v, ok := t[nthKey]; ok && strings.TrimSpace(v) != "" {
+		active = v
+	}
+	if v, ok := t[_DAYOFMO]; ok && strings.TrimSpace(v) != "" {
+		if rep, ok := dayOfMonthOverride(v, ts.dom); ok {
+			active = rep
 		}
 	}
 
-	// Is today a weekend?
-	if _, ok := _WEEKENDS[ts.day]; ok {
-		if tag, ok := t[_WEEKEND]; ok && strings.TrimSpace(tag) != "" {
-			return ts.parseSchedule(tag, ts.hour)
-		}
+	if strings.TrimSpace(active) == "" {
+		// No active schedule today
+		return action.NULL_ACTION, nil
 	}
 
-	// Is today a day?
-	if tag, ok := t[_ANYDAY]; ok && strings.TrimSpace(tag) != "" {
-		return ts.parseSchedule(tag, ts.hour)
-	}
-
-	// No match, no action
-	return action.NULL_ACTION, nil
+	return ts.parseSchedule(active, ts.hour)
 }
 
 // SetLocation changes the timezone of the scheduler
@@ -116,6 +131,11 @@ func (ts AnykeyNLScheduler) parseSchedule(sch string, hour int) (action.Action,
 	// Default: null action
 	act := action.NULL_ACTION
 
+	// Remove inline comment support like "... # comment"
+	if idx := strings.Index(sch, "#"); idx >= 0 {
+		sch = sch[:idx]
+	}
+
 	// Empty or whitespace-only schedule
 	sch = strings.TrimSpace(sch)
 	if sch == "" {
@@ -128,39 +148,103 @@ func (ts AnykeyNLScheduler) parseSchedule(sch string, hour int) (action.Action,
 		tokens[i] = strings.TrimSpace(tokens[i])
 	}
 
-	var want string
-	switch {
-	case len(tokens) == 0:
-		want = "*" // nothing declared means no action
-	case hour < len(tokens):
-		want = tokens[hour]
-	default:
-		// Fewer than 24 tokens: repeat the last provided token
-		want = tokens[len(tokens)-1]
+	// Enforce exactly 24 tokens
+	if len(tokens) != 24 {
+		return act, ErrInvalidTokenCount{Expected: 24, Got: len(tokens)}
 	}
 
-	if want == "*" || strings.TrimSpace(want) == "" {
+	want := tokens[hour]
+	if want == "" || want == "*" {
 		return act, nil
+	}
+
+	// Parenthesized tokens are not supported at this layer
+	if strings.HasPrefix(want, "(") && strings.HasSuffix(want, ")") {
+		return act, ErrUnsupportedToken{Token: want}
 	}
 
 	wantInt, err := strconv.Atoi(want)
 	if err != nil {
-		return act, fmt.Errorf("invalid schedule token %q in %q: %w", want, sch, err)
+		return act, ErrInvalidToken{Token: want, Reason: err.Error()}
 	}
 
-	// Backward-compatible mapping and safety clamp for Action(int8)
+	// Map numeric to action
 	switch {
 	case wantInt <= 0:
 		act = action.OFF
 	case wantInt == 1:
 		act = action.ON
 	default:
-		// Clamp to int8 max to avoid overflow
 		if wantInt > 127 {
-			wantInt = 127
+			wantInt = 127 // clamp to int8
 		}
 		act = action.ToAction(wantInt)
 	}
 
 	return act, nil
+}
+
+// toStringMap normalizes expected OCI defined tag maps into a map[string]string.
+func toStringMap(tags any) (map[string]string, error) {
+	switch tt := tags.(type) {
+	case map[string]string:
+		return tt, nil
+	case map[string]interface{}:
+		out := make(map[string]string, len(tt))
+		for k, v := range tt {
+			if v == nil {
+				continue
+			}
+			out[k] = strings.TrimSpace(fmt.Sprint(v))
+		}
+		return out, nil
+	default:
+		return nil, ErrInvalidInput{Input: tags}
+	}
+}
+
+// nthInMonth returns the 1-based occurrence of the weekday within the month for t.
+func nthInMonth(t time.Time) int {
+	return ((t.Day() - 1) / 7) + 1
+}
+
+// dayOfMonthOverride parses a DayOfMonth schedule value like "1:0,15:1" and
+// if the current day matches, returns a repeated 24-hour schedule string
+// like "1,1,1,..." and true. Otherwise returns "", false.
+func dayOfMonthOverride(v string, today int) (string, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", false
+	}
+	parts := strings.Split(v, ",")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		kv := strings.SplitN(p, ":", 2)
+		if len(kv) != 2 {
+			// invalid pair is a hard error in strict mode; keep backward compatible by ignoring here
+			// and let overall schedule validation catch issues if chosen.
+			continue
+		}
+		dstr := strings.TrimSpace(kv[0])
+		val := strings.TrimSpace(kv[1])
+		d, err := strconv.Atoi(dstr)
+		if err != nil {
+			continue
+		}
+		if d == today {
+			// Build a 24-token repeated schedule
+			if val == "" {
+				return "", false
+			}
+			tokens := make([]string, 24)
+			for i := range tokens {
+				tokens[i] = val
+			}
+			return strings.Join(tokens, ","), true
+		}
+	}
+	return "", false
 }

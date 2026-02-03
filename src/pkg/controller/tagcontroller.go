@@ -8,6 +8,7 @@ import (
 
 	"github.com/flynnkc/oci-frugal/src/pkg/action"
 	"github.com/flynnkc/oci-frugal/src/pkg/controller/handlers"
+	"github.com/flynnkc/oci-frugal/src/pkg/controller/task"
 	"github.com/flynnkc/oci-frugal/src/pkg/scheduler"
 	"github.com/oracle/oci-go-sdk/v65/analytics"
 	"github.com/oracle/oci-go-sdk/v65/common"
@@ -215,6 +216,7 @@ func (tc *TagController) Run(controlWg *sync.WaitGroup) {
 	workerWg.Wait()
 }
 
+// worker does the work of taking resources, creating tasks, and calling handlers
 func (tc *TagController) worker(id uint8, resources <-chan rs.ResourceSummary,
 	wg *sync.WaitGroup) {
 	defer wg.Done()
@@ -222,13 +224,14 @@ func (tc *TagController) worker(id uint8, resources <-chan rs.ResourceSummary,
 	// Log attribute to identify worker
 	logGroup := slog.Group("Worker",
 		slog.Int("Worker ID", int(id)))
-	tc.log.Info("Started Worker", logGroup)
+	tc.log.Debug("Started Worker", logGroup)
 
 	for {
 		if item, more := <-resources; more {
 			itemGroup := slog.Group("Resource", logGroup,
 				slog.String("Identifier", *item.Identifier),
-				slog.String("Type", *item.ResourceType))
+				slog.String("Type", *item.ResourceType),
+				"Schedule", item.DefinedTags[tc.tagNamespace])
 			tc.log.Info("Handling Resource", itemGroup)
 
 			tags := item.DefinedTags[tc.tagNamespace]
@@ -237,18 +240,32 @@ func (tc *TagController) worker(id uint8, resources <-chan rs.ResourceSummary,
 				tc.log.Warn("error evaluating resource", itemGroup,
 					"error", err)
 			} else if act == action.NULL_ACTION {
-				tc.log.Info("No action required", logGroup, itemGroup)
+				tc.log.Info("No action required", itemGroup)
+				continue
+			}
+
+			// If controller action and scheduler action are not compatible, skip
+			if !action.Compare(tc.action, act) {
+				tc.log.Info("Controller not configured for action -- skipping",
+					itemGroup,
+					slog.Any("Controller Action", tc.action))
 				continue
 			}
 
 			switch *item.ResourceType {
 			case "Instance":
-				handlers.HandleCompute(item)
+				err = handlers.HandleCompute(task.NewTask(act, item))
 			default:
 				tc.log.Error("Unsupported resource type", logGroup, itemGroup)
 			}
+			if err != nil {
+				tc.log.Error("error handling resource",
+					itemGroup,
+					"error", err)
+			}
+
 		} else {
-			tc.log.Info("Work finished", logGroup)
+			tc.log.Debug("Work finished", logGroup)
 			return
 		}
 	}
