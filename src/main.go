@@ -53,11 +53,11 @@ func main() {
 	log.Info("Frugal started...")
 	log.Debug("Frugal initialized with the following settings",
 		"Log Level", cfg.LogLevel(),
-		"Region", cfg.Region(),
-		"Tag Namespace", cfg.TagNamespace(),
-		"Principal", cfg.AuthType(),
+		"Region", *cfg.Region(),
+		"Tag Namespace", *cfg.TagNamespace(),
+		"Principal", *cfg.AuthType(),
 		"Scheduler", configuration.ANYKEYNL_SCHEDULER,
-		"Action", cfg.Action(),
+		"Action", *cfg.Action(),
 		"Timezone", cfg.Timezone())
 
 	run(cfg)

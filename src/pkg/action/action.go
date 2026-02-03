@@ -1,10 +1,9 @@
 package action
 
 const (
-	// Actions are int8 and we reserve positive integers so constants are all <0
 	NULL_ACTION Action = 0      // 00000000
-	OFF         Action = 0 << 1 // 00000001
-	ON          Action = 0 << 2 // 00000010
+	OFF         Action = 1 << 0 // 00000001
+	ON          Action = 1 << 1 // 00000010
 	ALL         Action = 255    // 11111111
 )
 

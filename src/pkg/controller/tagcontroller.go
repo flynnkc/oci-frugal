@@ -239,15 +239,11 @@ func (tc *TagController) worker(id uint8, resources <-chan rs.ResourceSummary,
 			if err != nil {
 				tc.log.Warn("error evaluating resource", itemGroup,
 					"error", err)
-			} else if act == action.NULL_ACTION {
-				tc.log.Info("No action required", itemGroup)
-				continue
 			}
 
 			// If controller action and scheduler action are not compatible, skip
 			if !action.Compare(tc.action, act) {
-				tc.log.Info("Controller not configured for action -- skipping",
-					itemGroup,
+				tc.log.Info("No action required", itemGroup,
 					slog.Any("Controller Action", tc.action))
 				continue
 			}
