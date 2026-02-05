@@ -115,9 +115,7 @@ func run(cfg *configuration.Configuration) {
 			TagNamespace:          cfg.TagNamespace(),
 			Scheduler:             sch,
 			SupportedActions:      *cfg.Action(),
-			Log: cfg.MakeLog(
-				"Component", "Controller",
-				"Region", region),
+			LogFunc:               cfg.MakeLog,
 		}
 
 		controller, err := controller.NewTagController(controllerOpts)

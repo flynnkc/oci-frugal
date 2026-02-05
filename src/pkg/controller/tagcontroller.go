@@ -7,14 +7,10 @@ import (
 	"time"
 
 	"github.com/flynnkc/oci-frugal/src/pkg/action"
-	"github.com/flynnkc/oci-frugal/src/pkg/controller/handlers"
+	"github.com/flynnkc/oci-frugal/src/pkg/controller/handler"
 	"github.com/flynnkc/oci-frugal/src/pkg/controller/task"
 	"github.com/flynnkc/oci-frugal/src/pkg/scheduler"
-	"github.com/oracle/oci-go-sdk/v65/analytics"
 	"github.com/oracle/oci-go-sdk/v65/common"
-	"github.com/oracle/oci-go-sdk/v65/core"
-	"github.com/oracle/oci-go-sdk/v65/database"
-	"github.com/oracle/oci-go-sdk/v65/integration"
 	rs "github.com/oracle/oci-go-sdk/v65/resourcesearch"
 )
 
@@ -31,10 +27,7 @@ type TagController struct {
 	region       string
 	scheduler    scheduler.Scheduler
 	action       action.Action
-	compute      core.ComputeClient
-	database     database.DatabaseClient
-	analytics    analytics.AnalyticsClient
-	integration  integration.IntegrationInstanceClient
+	handler      handler.Handler
 	search       rs.ResourceSearchClient
 	log          *slog.Logger
 }
@@ -52,45 +45,23 @@ func NewTagController(opts ControllerOpts) (*TagController, error) {
 		action:       opts.SupportedActions,
 	}
 
+	handlerOpts := handler.HandlerOpts{
+		ConfigProvider: opts.ConfigurationProvider,
+		Logger:         opts.LogFunc("Component", "Handler"),
+	}
+
+	h, err := handler.NewResourceHandler(handlerOpts)
+	if err != nil {
+		return nil, err
+	}
+	c.handler = h
+
 	// Prefer an expicit log but set default log if needed
-	if opts.Log != nil {
-		c.log = opts.Log
+	if opts.LogFunc != nil {
+		c.log = opts.LogFunc("Component", "TagController")
 	} else {
 		c.log = slog.Default()
 	}
-
-	// Create various resource clients
-	// Compute
-	instance, err := core.NewComputeClientWithConfigurationProvider(
-		opts.ConfigurationProvider)
-	if err != nil {
-		return nil, err
-	}
-	c.compute = instance
-
-	// Database
-	db, err := database.NewDatabaseClientWithConfigurationProvider(
-		opts.ConfigurationProvider)
-	if err != nil {
-		return nil, err
-	}
-	c.database = db
-
-	// Analytics Cloud
-	a, err := analytics.NewAnalyticsClientWithConfigurationProvider(
-		opts.ConfigurationProvider)
-	if err != nil {
-		return nil, err
-	}
-	c.analytics = a
-
-	// Integration Cloud
-	i, err := integration.NewIntegrationInstanceClientWithConfigurationProvider(
-		opts.ConfigurationProvider)
-	if err != nil {
-		return nil, err
-	}
-	c.integration = i
 
 	// Resource Search
 	s, err := rs.NewResourceSearchClientWithConfigurationProvider(
@@ -173,11 +144,8 @@ func (tc *TagController) Search(query string) (rs.ResourceSummaryCollection, err
 }
 
 func (tc *TagController) SetRegion(region string) {
-	tc.analytics.SetRegion(region)
-	tc.compute.SetRegion(region)
-	tc.database.SetRegion(region)
-	tc.integration.SetRegion(region)
 	tc.search.SetRegion(region)
+	tc.handler.SetRegion(region)
 }
 
 // Run starts the controller spawning workers and queuing tasks
@@ -257,12 +225,7 @@ func (tc *TagController) worker(id uint8, resources <-chan rs.ResourceSummary,
 				continue
 			}
 
-			switch *item.ResourceType {
-			case "Instance":
-				err = handlers.HandleCompute(task.NewTask(act, item))
-			default:
-				tc.log.Error("Unsupported resource type", logGroup, itemGroup)
-			}
+			err = tc.handler.HandleResource(task.NewTask(act, item))
 			if err != nil {
 				tc.log.Error("error handling resource",
 					itemGroup,

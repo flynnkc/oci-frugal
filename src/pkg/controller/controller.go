@@ -2,10 +2,10 @@ package controller
 
 import (
 	"fmt"
-	"log/slog"
 	"sync"
 
 	"github.com/flynnkc/oci-frugal/src/pkg/action"
+	"github.com/flynnkc/oci-frugal/src/pkg/configuration"
 	"github.com/flynnkc/oci-frugal/src/pkg/scheduler"
 	"github.com/oracle/oci-go-sdk/v65/common"
 )
@@ -28,5 +28,5 @@ type ControllerOpts struct {
 	Region                *string
 	Scheduler             scheduler.Scheduler
 	SupportedActions      action.Action
-	Log                   *slog.Logger
+	LogFunc               configuration.LogFunc
 }
