@@ -65,18 +65,45 @@ func NewAnykeyNLSchedulerWithLocation(loc *time.Location) *AnykeyNLScheduler {
 	}
 }
 
-// Evaluate determines an action to take on the resource. Input must be of type
-// map[string]string.
-func (ts AnykeyNLScheduler) Evaluate(tags any) (action.Action, error) {
+// Evaluate determines an action to take on the resource.
+// Input may be either:
+//   - string (or []byte / fmt.Stringer): a 24-token schedule, parsed directly
+//   - map[string]string or map[string]interface{}: tags to resolve via ActiveSchedule
+func (ts AnykeyNLScheduler) Evaluate(input any) (action.Action, error) {
+	switch v := input.(type) {
+	case string:
+		// Direct evaluation of schedule string
+		return ts.parseSchedule(v, ts.hour)
+	case []byte:
+		return ts.parseSchedule(string(v), ts.hour)
+	case fmt.Stringer:
+		return ts.parseSchedule(v.String(), ts.hour)
+	default:
+		// Treat as tags and resolve today's active schedule
+		active, err := ts.ActiveSchedule(input)
+		if err != nil {
+			return action.NULL_ACTION, err
+		}
+
+		if strings.TrimSpace(active) == "" {
+			// No active schedule today
+			return action.NULL_ACTION, nil
+		}
+
+		return ts.parseSchedule(active, ts.hour)
+	}
+}
+
+// ActiveSchedule determines the active schedule per AnykeyNL priority
+// (least -> most specific), with later matches overriding earlier ones:
+// AnyDay -> WeekDay/Weekend -> Day-of-week -> Nth day-of-week in month -> DayOfMonth
+func (ts AnykeyNLScheduler) ActiveSchedule(tags any) (string, error) {
 	// Normalize tags into map[string]string
 	t, err := toStringMap(tags)
 	if err != nil {
-		return action.NULL_ACTION, err
+		return "", err
 	}
 
-	// Determine the active schedule per AnykeyNL priority (least -> most specific),
-	// with later matches overriding earlier ones:
-	// AnyDay -> WeekDay/Weekend -> Day-of-week -> Nth day-of-week in month -> DayOfMonth
 	active := ""
 
 	if v, ok := t[_ANYDAY]; ok && strings.TrimSpace(v) != "" {
@@ -104,12 +131,7 @@ func (ts AnykeyNLScheduler) Evaluate(tags any) (action.Action, error) {
 		}
 	}
 
-	if strings.TrimSpace(active) == "" {
-		// No active schedule today
-		return action.NULL_ACTION, nil
-	}
-
-	return ts.parseSchedule(active, ts.hour)
+	return active, nil
 }
 
 // SetLocation changes the timezone of the scheduler

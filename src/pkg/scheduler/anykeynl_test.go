@@ -127,3 +127,28 @@ func TestEvaluate_DayOfMonth(t *testing.T) {
 		t.Fatalf("expected ON from DayOfMonth match, got %v", act)
 	}
 }
+
+func TestEvaluate_DirectScheduleString_OK(t *testing.T) {
+	sch := NewAnykeyNLScheduler()
+	act, err := sch.Evaluate(repeat24("1"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if act != action.ON {
+		t.Fatalf("expected ON when evaluating direct schedule string, got %v", act)
+	}
+}
+
+func TestEvaluate_DirectScheduleString_InvalidCount(t *testing.T) {
+	sch := NewAnykeyNLScheduler()
+	act, err := sch.Evaluate("0,1,1")
+	if err == nil {
+		t.Fatalf("expected error for invalid token count, got nil")
+	}
+	if _, ok := err.(ErrInvalidTokenCount); !ok {
+		t.Fatalf("expected ErrInvalidTokenCount, got %T: %v", err, err)
+	}
+	if act != action.NULL_ACTION {
+		t.Fatalf("expected NULL_ACTION on error, got %v", act)
+	}
+}

@@ -230,12 +230,21 @@ func (tc *TagController) worker(id uint8, resources <-chan rs.ResourceSummary,
 		if item, more := <-resources; more {
 			itemGroup := slog.Group("Resource", logGroup,
 				slog.String("Identifier", *item.Identifier),
-				slog.String("Type", *item.ResourceType),
-				"Schedule", item.DefinedTags[tc.tagNamespace])
-			tc.log.Info("Handling Resource", itemGroup)
+				slog.String("Type", *item.ResourceType))
 
-			tags := item.DefinedTags[tc.tagNamespace]
-			act, err := tc.scheduler.Evaluate(tags)
+			activeSchedule, err := tc.scheduler.ActiveSchedule(
+				item.DefinedTags[tc.tagNamespace])
+			if err != nil {
+				tc.log.Error("error problem reading active schedule",
+					"error", err,
+					"tags", item.DefinedTags[tc.tagNamespace])
+				continue
+			}
+
+			tc.log.Info("Handling Resource", itemGroup,
+				slog.String("active schedule", activeSchedule))
+
+			act, err := tc.scheduler.Evaluate(activeSchedule)
 			if err != nil {
 				tc.log.Warn("error evaluating resource", itemGroup,
 					"error", err)

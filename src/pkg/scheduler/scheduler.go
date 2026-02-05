@@ -16,6 +16,7 @@ type Scheduler interface {
 	SetLocation(*time.Location) (Scheduler, error)
 	// Type returns the type of scheduler in use
 	Type() string
+	ActiveSchedule(any) (string, error)
 }
 
 type NullScheduler struct{}
@@ -30,6 +31,10 @@ func (n *NullScheduler) SetLocation(t *time.Location) (Scheduler, error) {
 
 func (n *NullScheduler) Type() string {
 	return configuration.NULL_SCHEDULER
+}
+
+func (n *NullScheduler) ActiveSchedule(t any) (string, error) {
+	return "", nil
 }
 
 // ScheduleFunc returns the function to generate the schedule based on configurations.
