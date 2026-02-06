@@ -199,6 +199,7 @@ func (h *ResourceHandler) handleCompute(t task.Task) error {
 			logGroup)
 	} else {
 		h.log.Info("Compute Handled - No Action Required",
+			slog.String("State", *t.Resource.LifecycleState),
 			slog.String("Action", "NONE"), logGroup)
 	}
 
@@ -225,7 +226,9 @@ func (h *ResourceHandler) handleDbSystem(t task.Task) error {
 
 		// Turn DB Node Off
 		if t.Action == action.OFF && (*node.LifecycleState != "STOPPED" &&
-			*node.LifecycleState != "STOPPING") {
+			*node.LifecycleState != "STOPPING" &&
+			*node.LifecycleState != "TERMINATING" &&
+			*node.LifecycleState != "TERMINATED") {
 			ctx, cancel := context.WithTimeout(context.Background(), DEFAULT_INTERVAL)
 
 			req := database.DbNodeActionRequest{
@@ -248,7 +251,9 @@ func (h *ResourceHandler) handleDbSystem(t task.Task) error {
 				slog.String("Status", resp.RawResponse.Status),
 				logGroup)
 		} else if t.Action == action.ON && (*node.LifecycleState != "RUNNING" &&
-			*node.LifecycleState != "STARTING") {
+			*node.LifecycleState != "STARTING" &&
+			*node.LifecycleState != "TERMINATING" &&
+			*node.LifecycleState != "TERMINATED") {
 			// Turn DB Node On
 			ctx, cancel := context.WithTimeout(context.Background(), DEFAULT_INTERVAL)
 
@@ -273,6 +278,7 @@ func (h *ResourceHandler) handleDbSystem(t task.Task) error {
 				logGroup)
 		} else {
 			h.log.Info("DB Node Handled - No Action Required",
+				slog.String("State", *t.Resource.LifecycleState),
 				slog.String("Action", "NONE"), logGroup)
 		}
 	}
@@ -294,7 +300,8 @@ func (h *ResourceHandler) handleAnalyticsInstance(t task.Task) error {
 	h.log.Debug("Handling Analytics Instance", logGroup)
 
 	// Deactivate Analytics Instance
-	if t.Action == action.OFF && *t.Resource.LifecycleState != "Inactive" {
+	if t.Action == action.OFF && *t.Resource.LifecycleState != "Inactive" &&
+		*t.Resource.LifecycleState != "DELETED" {
 		ctx, cancel := context.WithTimeout(context.Background(), DEFAULT_INTERVAL)
 		defer cancel()
 
@@ -307,9 +314,32 @@ func (h *ResourceHandler) handleAnalyticsInstance(t task.Task) error {
 			return err
 		}
 
-		h.log.Info("Handled Analytics Instance",
+		h.log.Info("Stopped Analytics Instance",
 			slog.String("Action", "STOP"),
 			slog.String("Status", resp.RawResponse.Status),
+			logGroup)
+	} else if t.Action == action.ON && *t.Resource.LifecycleState != "RUNNING" &&
+		*t.Resource.LifecycleState != "DELETED" {
+		ctx, cancel := context.WithTimeout(context.Background(), DEFAULT_INTERVAL)
+		defer cancel()
+
+		req := analytics.StartAnalyticsInstanceRequest{
+			AnalyticsInstanceId: t.Resource.Identifier,
+		}
+
+		resp, err := h.analytics.StartAnalyticsInstance(ctx, req)
+		if err != nil {
+			return err
+		}
+
+		h.log.Info("Started Analytics Instance",
+			slog.String("Action", "START"),
+			slog.String("Status", resp.RawResponse.Status),
+			logGroup)
+	} else {
+		h.log.Info("Analytics Instance Handled - No Action Required",
+			slog.String("Action", "NONE"),
+			slog.String("State", *t.Resource.LifecycleState),
 			logGroup)
 	}
 
