@@ -191,7 +191,7 @@ func (tc *TagController) worker(id uint8, resources <-chan rs.ResourceSummary,
 
 	// Log attribute to identify worker
 	logGroup := slog.Group("Worker",
-		slog.Int("Worker ID", int(id)))
+		slog.Int("ID", int(id)))
 	tc.log.Debug("Started Worker", logGroup)
 
 	for {

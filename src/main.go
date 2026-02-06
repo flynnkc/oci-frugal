@@ -183,7 +183,7 @@ func addFlags(c configuration.ConfigurationOpts) configuration.ConfigurationOpts
 	})
 
 	// Config Profile
-	flag.Func("profiile", "OCI configuration profile to use", func(s string) error {
+	flag.Func("profile", "OCI configuration profile to use", func(s string) error {
 		opts.ConfigProfile = &s
 		return nil
 	})
@@ -198,6 +198,12 @@ func addFlags(c configuration.ConfigurationOpts) configuration.ConfigurationOpts
 	// Log Level
 	flag.Func("v", "level to set logs", func(s string) error {
 		opts.LogLevel = &s
+		return nil
+	})
+
+	// Tag Namespace
+	flag.Func("tag", "Tag namespace to use for schedule", func(s string) error {
+		opts.TagNamespace = &s
 		return nil
 	})
 
@@ -239,6 +245,10 @@ func addEnvironment(c configuration.ConfigurationOpts) configuration.Configurati
 
 	if opts.LogLevel == nil {
 		opts.LogLevel = checkEnv(PREFIX + LOGLEVEL)
+	}
+
+	if opts.TagNamespace == nil {
+		opts.TagNamespace = checkEnv(PREFIX + TAGNAMESPACE)
 	}
 
 	return opts
