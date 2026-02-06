@@ -4,7 +4,10 @@ go 1.24.0
 
 toolchain go1.24.3
 
-require github.com/oracle/oci-go-sdk/v65 v65.107.0
+require (
+	github.com/flynnkc/token-pool v1.0.0
+	github.com/oracle/oci-go-sdk/v65 v65.107.0
+)
 
 require (
 	github.com/gofrs/flock v0.10.0 // indirect

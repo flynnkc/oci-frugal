@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/flynnkc/oci-frugal/src/pkg/action"
 	"github.com/flynnkc/oci-frugal/src/pkg/controller/task"
+	tokenpool "github.com/flynnkc/token-pool"
 	"github.com/oracle/oci-go-sdk/v65/analytics"
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/core"
@@ -16,7 +16,11 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/integration"
 )
 
-const TIMEOUT time.Duration = 5 * time.Second
+const (
+	DEFAULT_INTERVAL     time.Duration = 3 * time.Second
+	MAX_INTERVAL         time.Duration = 30 * time.Second
+	DEFAULT_MAX_REQUESTS int           = 8
+)
 
 type Handler interface {
 	HandleResource(task.Task) error
@@ -24,8 +28,10 @@ type Handler interface {
 }
 
 type HandlerOpts struct {
-	ConfigProvider common.ConfigurationProvider
-	Logger         *slog.Logger
+	ConfigProvider  common.ConfigurationProvider
+	Logger          *slog.Logger
+	MaxRequests     *int
+	RequestInterval *time.Duration // 1-30 Seconds
 }
 
 type ResourceHandler struct {
@@ -34,6 +40,7 @@ type ResourceHandler struct {
 	analytics   analytics.AnalyticsClient
 	integration integration.IntegrationInstanceClient
 	log         *slog.Logger
+	tp          *tokenpool.TokenPool
 }
 
 func NewResourceHandler(opts HandlerOpts) (*ResourceHandler, error) {
@@ -41,7 +48,23 @@ func NewResourceHandler(opts HandlerOpts) (*ResourceHandler, error) {
 
 	if opts.Logger != nil {
 		h.log = opts.Logger
+	} else {
+		h.log = slog.Default()
+		h.log.Warn("Handler Logger set to Default")
 	}
+
+	h.log.Debug("Creating Handler")
+
+	if opts.MaxRequests == nil {
+		opts.MaxRequests = common.Int(DEFAULT_MAX_REQUESTS)
+	}
+
+	if opts.RequestInterval == nil {
+		t := DEFAULT_INTERVAL
+		opts.RequestInterval = &t
+	}
+
+	h.tp = tokenpool.NewTokenPool(*opts.MaxRequests, *opts.MaxRequests, *opts.RequestInterval)
 
 	if opts.ConfigProvider == nil {
 		return nil, fmt.Errorf("error Handler cannot have nil ConfigProvider")
@@ -80,19 +103,6 @@ func NewResourceHandler(opts HandlerOpts) (*ResourceHandler, error) {
 	return &h, nil
 }
 
-// HandleResource routes task to the appropriate handler
-func (h *ResourceHandler) HandleResource(t task.Task) error {
-	if t.Resource.ResourceType == nil {
-		return fmt.Errorf("nil resource")
-	}
-	switch strings.ToLower(*t.Resource.ResourceType) {
-	case "instance":
-		return h.handleCompute(t)
-	}
-
-	return nil
-}
-
 func (h *ResourceHandler) SetRegion(region string) {
 	h.analytics.SetRegion(region)
 	h.compute.SetRegion(region)
@@ -100,16 +110,42 @@ func (h *ResourceHandler) SetRegion(region string) {
 	h.integration.SetRegion(region)
 }
 
+// HandleResource routes task to the appropriate handler
+func (h *ResourceHandler) HandleResource(t task.Task) error {
+	h.log.Debug("Handling Resource",
+		"Type", *t.Resource.ResourceType)
+	if t.Resource.ResourceType == nil {
+		return fmt.Errorf("nil resource")
+	}
+
+	// Require token for rate limiting
+	ctx, cancel := context.WithTimeout(context.Background(), MAX_INTERVAL)
+	defer cancel()
+	h.tp.Acquire(ctx)
+
+	switch *t.Resource.ResourceType {
+	case "Instance":
+		return h.handleCompute(t)
+	}
+
+	return nil
+}
+
 // HandleCompute takes actions on compute resources. Limited to turning instance
 // on or off.
 func (h *ResourceHandler) handleCompute(t task.Task) error {
-	h.log.Debug("Handling Compute",
-		slog.String("Resource ID", *t.Resource.Identifier),
-		slog.Int("Action", int(t.Action)))
+	resourceGroup := slog.Group("Resource",
+		slog.String("ID", *t.Resource.Identifier),
+		slog.Int("Action", int(t.Action)),
+		slog.String("State", *t.Resource.LifecycleState),
+	)
 
-	// Turn off
-	if t.Action == action.OFF {
-		ctx, cancel := contextWithTimeout()
+	h.log.Debug("Handling Compute", resourceGroup)
+
+	// Turn off if action is off and instance is not already off
+	if t.Action == action.OFF && (*t.Resource.LifecycleState != "STOPPED" &&
+		*t.Resource.LifecycleState != "STOPPING") {
+		ctx, cancel := context.WithTimeout(context.Background(), DEFAULT_INTERVAL)
 		defer cancel()
 
 		req := core.InstanceActionRequest{
@@ -121,36 +157,34 @@ func (h *ResourceHandler) handleCompute(t task.Task) error {
 		if err != nil {
 			return err
 		}
-		h.log.Debug("Compute Handled",
-			slog.String("Resource ID", *t.Resource.Identifier),
+		h.log.Debug("Compute Handled", resourceGroup,
 			slog.String("Status Message", resp.RawResponse.Status),
-			slog.Int("Action", int(t.Action)))
+			slog.String("Action", "STOP"))
+
+		return nil
+	} else if t.Action == action.ON && *t.Resource.LifecycleState != "RUNNING" {
+		// Else turn on -- no vertical scaling supported at this time
+		ctx, cancel := context.WithTimeout(context.Background(), DEFAULT_INTERVAL)
+		defer cancel()
+
+		req := core.InstanceActionRequest{
+			InstanceId: t.Resource.Identifier,
+			Action:     core.InstanceActionActionStart,
+		}
+
+		resp, err := h.compute.InstanceAction(ctx, req)
+		if err != nil {
+			return err
+		}
+		h.log.Debug("Compute Handled", resourceGroup,
+			slog.String("Status Message", resp.RawResponse.Status),
+			slog.String("Action", "START"))
 
 		return nil
 	}
 
-	// Else turn on -- no vertical scaling supported at this time
-	ctx, cancel := contextWithTimeout()
-	defer cancel()
-
-	req := core.InstanceActionRequest{
-		InstanceId: t.Resource.Identifier,
-		Action:     core.InstanceActionActionStart,
-	}
-
-	resp, err := h.compute.InstanceAction(ctx, req)
-	if err != nil {
-		return err
-	}
-	h.log.Debug("Compute Handled",
-		slog.String("Resource ID", *t.Resource.Identifier),
-		slog.String("Status Message", resp.RawResponse.Status),
-		slog.Int("Action", int(t.Action)))
+	h.log.Debug("No Action Required", resourceGroup,
+		slog.String("Action", "NONE"))
 
 	return nil
-}
-
-// Get contexts with timeout
-func contextWithTimeout() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), TIMEOUT)
 }
