@@ -20,6 +20,8 @@ const (
 	// Defaults
 	DEFAULT_NAMESPACE string = "Schedule"
 	DEFAULT_LOGLEVEL  string = "INFO"
+	DEFAULT_SHUTDOWN  string = "soft"
+	DEFAULT_TIMEOUT          = 10 * time.Minute
 
 	// Scheduler
 	NULL_SCHEDULER     string = "nullscheduler"
@@ -42,21 +44,45 @@ type Configuration struct {
 	privateKeyPassword *string
 	logFunc            func(...any) *slog.Logger
 	logLevel           string
+	dryRun             bool
+	shutdown           string
+	timeout            time.Duration
 }
 
+// ConfigurationOpts contains unvalidated inputs shared by CLI and API callers.
+// Nil optional values receive defaults in NewConfiguration; explicit values are validated.
 type ConfigurationOpts struct {
-	LogLevel      *string // Default Info
-	Action        *string // Default All
-	TagNamespace  *string // Default Schedule
-	ConfigFile    *string // Default ~/.oci/config
-	ConfigProfile *string // Default DEFAULT
-	KeyPassword   *string // Optional
-	Principal     *string // Default API Key
-	Region        *string // Optional
-	Timezone      *string // Default local timezone
+	LogLevel      *string        // Default Info
+	Action        *string        // Default All
+	TagNamespace  *string        // Default Schedule
+	ConfigFile    *string        // Default ~/.oci/config
+	ConfigProfile *string        // Default DEFAULT
+	KeyPassword   *string        // Optional
+	Principal     *string        // Default API Key
+	Region        *string        // Optional
+	Timezone      *string        // Default local timezone
+	DryRun        bool           // Default false; plan without submitting power requests
+	Shutdown      *string        // Default soft; Compute shutdown policy (soft or hard)
+	Timeout       *time.Duration // Default 10 minutes for the complete run
 }
 
 func NewConfiguration(opts ConfigurationOpts) (*Configuration, error) {
+	// Execution defaults and validation belong here so all callers use the same rules.
+	shutdown := DEFAULT_SHUTDOWN
+	if opts.Shutdown != nil {
+		shutdown = *opts.Shutdown
+	}
+	if shutdown != "soft" && shutdown != "hard" {
+		return nil, fmt.Errorf("shutdown must be soft or hard")
+	}
+	timeout := DEFAULT_TIMEOUT
+	if opts.Timeout != nil {
+		timeout = *opts.Timeout
+	}
+	if timeout <= 0 {
+		return nil, fmt.Errorf("timeout must be positive")
+	}
+
 	// Log variables
 	var logFunc LogFunc
 	if opts.LogLevel == nil {
@@ -73,7 +99,7 @@ func NewConfiguration(opts ConfigurationOpts) (*Configuration, error) {
 		case "error":
 			logFunc = StdTextLoggerError
 		default:
-			logFunc = StdTextLoggerInfo
+			return nil, fmt.Errorf("invalid log level %q", *opts.LogLevel)
 		}
 	}
 
@@ -93,6 +119,10 @@ func NewConfiguration(opts ConfigurationOpts) (*Configuration, error) {
 		opts.TagNamespace = common.String(DEFAULT_NAMESPACE)
 	}
 
+	if strings.TrimSpace(*opts.TagNamespace) == "" {
+		return nil, fmt.Errorf("tag namespace cannot be empty")
+	}
+
 	var act action.Action
 	if opts.Action == nil {
 		act = action.ALL
@@ -105,7 +135,7 @@ func NewConfiguration(opts ConfigurationOpts) (*Configuration, error) {
 		case "off":
 			act = action.OFF
 		default:
-			act = action.ALL
+			return nil, fmt.Errorf("invalid action %q: expected all, on, or off", *opts.Action)
 		}
 	}
 
@@ -145,9 +175,9 @@ func NewConfiguration(opts ConfigurationOpts) (*Configuration, error) {
 		default:
 			err = fmt.Errorf("invalid principal type %s", *opts.Principal)
 		}
-		if err != nil {
-			return nil, fmt.Errorf("error building configuration provider: %w", err)
-		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("error building configuration provider: %w", err)
 	}
 
 	// Define region
@@ -167,6 +197,9 @@ func NewConfiguration(opts ConfigurationOpts) (*Configuration, error) {
 		privateKeyPassword: opts.KeyPassword,
 		logFunc:            logFunc,
 		logLevel:           *opts.LogLevel,
+		dryRun:             opts.DryRun,
+		shutdown:           shutdown,
+		timeout:            timeout,
 	}
 
 	return &o, nil
@@ -214,4 +247,19 @@ func (c *Configuration) MakeLog(v ...any) *slog.Logger {
 
 func (c *Configuration) LogLevel() string {
 	return c.logLevel
+}
+
+// DryRun reports whether execution should stop after read-only planning.
+func (c *Configuration) DryRun() bool {
+	return c.dryRun
+}
+
+// Shutdown returns the Compute shutdown policy: soft or hard.
+func (c *Configuration) Shutdown() string {
+	return c.shutdown
+}
+
+// Timeout bounds the complete run, independently of any HTTP request timeout.
+func (c *Configuration) Timeout() time.Duration {
+	return c.timeout
 }

@@ -1,12 +1,17 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
-	"log/slog"
+	"io"
 	"os"
-	"strings"
+	"os/signal"
+	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/flynnkc/oci-frugal/src/pkg/configuration"
@@ -15,249 +20,283 @@ import (
 	"github.com/flynnkc/oci-frugal/src/pkg/scheduler"
 )
 
-const (
-	// Environment variables
-	PREFIX       string = "FRUGAL_"
-	ACTIONTYPE   string = "ACTION_TYPE"
-	LOGLEVEL     string = "LOG_LEVEL"
-	REGION       string = "REGION"
-	PRINCIPAL    string = "AUTH_TYPE"
-	FILE         string = "FILE"
-	PROFILE      string = "PROFILE"
-	KEYPASS      string = "KEY_PASS"
-	TAGNAMESPACE string = "TAG_NAMESPACE"
-	TIMEZONE     string = "TIMEZONE"
-)
+type report struct {
+	Shutdown   string              `json:"shutdown"`
+	DryRun     bool                `json:"dry_run"`
+	Phase      string              `json:"phase"`
+	StartedAt  time.Time           `json:"started_at"`
+	FinishedAt time.Time           `json:"finished_at"`
+	Regions    []controller.Result `json:"regions"`
+	Error      string              `json:"error,omitempty"`
+}
 
-var (
-	services []string = []string{ // Supported services to be managed by the script
-		"instance",
-		"dbsystem",
-		"autonomousdatabase",
-		"analyticsinstance",
-		"integrationinstance",
-	}
-)
+type dependencies struct {
+	regions    func(context.Context, *configuration.Configuration) ([]string, error)
+	controller func(controller.ControllerOpts) (controller.Controller, error)
+}
 
 func main() {
-	cfgOpts := setup()
-
-	cfg, err := configuration.NewConfiguration(cfgOpts)
-	if err != nil {
-		slog.Default().Error("error loading configuration: %w", "err", err)
-		os.Exit(1)
-	}
-
-	log := cfg.MakeLog("Component", "main")
-
-	log.Info("Frugal started...")
-	log.Debug("Frugal initialized with the following settings",
-		"Log Level", cfg.LogLevel(),
-		"Region", *cfg.Region(),
-		"Tag Namespace", *cfg.TagNamespace(),
-		"Principal", *cfg.AuthType(),
-		"Scheduler", configuration.ANYKEYNL_SCHEDULER,
-		"Action", *cfg.Action(),
-		"Timezone", cfg.Timezone())
-
-	run(cfg)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := command(ctx, os.Args[1:], os.LookupEnv, os.Stdout, os.Stderr, defaultDependencies())
+	stop()
+	os.Exit(code)
 }
 
-func run(cfg *configuration.Configuration) {
-	startTime := time.Now()
-	log := cfg.MakeLog("Component", "Main")
-
-	log.Info("Supported Services", "Services", strings.Join(services, ", "))
-
-	// Set region based on flag/environment variable
-	var regions []string
-	if *cfg.Region() != "" {
-		regions = append(regions, *cfg.Region())
-		log.Debug("Region specified in flags, not retrieving subscribed regions",
-			"Region", regions[0])
-	} else {
-		// Get list of subscribed regions
-		idClient, err := id.NewIdentityClient(cfg.Provider())
-		if err != nil {
-			log.Error("error getting identity client",
-				"error", err)
-			os.Exit(1)
-		}
-
-		regions, err = idClient.GetRegions()
-		if err != nil {
-			log.Error("error getting regions",
-				"error", err)
-		}
-		if len(regions) == 0 {
-			log.Error("error no regions set")
-			os.Exit(1)
-		}
-
-		log.Debug("Subscribed regions",
-			"Regions", regions)
+func command(
+	ctx context.Context,
+	args []string,
+	env func(string) (string, bool),
+	out, errOut io.Writer,
+	deps dependencies,
+) int {
+	opts, err := parseOptions(args, env, errOut)
+	if errors.Is(err, flag.ErrHelp) {
+		return 0
 	}
+	if err != nil {
+		writeCommandError(out, errOut, err)
+		return 2
+	}
+	cfg, err := configuration.NewConfiguration(opts)
+	if err != nil {
+		writeCommandError(out, errOut, err)
+		return 2
+	}
+	result, err := run(ctx, cfg, deps)
+	if outputErr := writeJSON(out, result); outputErr != nil {
+		fmt.Fprintln(errOut, outputErr)
+		return 1
+	}
+	if err != nil {
+		return 1
+	}
+	return 0
+}
 
-	schFunc := scheduler.ScheduleFunc(*cfg.ScheduleType())
-	sch := schFunc()
+func writeJSON(out io.Writer, value any) error {
+	encoder := json.NewEncoder(out)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(value)
+}
 
-	// Main control loop
-	lc := len(regions)
+func writeCommandError(out, errOut io.Writer, commandErr error) {
+	errorResponse := map[string]string{"error": commandErr.Error()}
+	if outputErr := writeJSON(out, errorResponse); outputErr != nil {
+		// Use diagnostics if writing the structured error to stdout fails.
+		fmt.Fprintln(errOut, outputErr)
+	}
+}
+
+func defaultDependencies() dependencies {
+	return dependencies{
+		regions: func(ctx context.Context, cfg *configuration.Configuration) ([]string, error) {
+			client, err := id.NewIdentityClient(cfg.Provider())
+			if err != nil {
+				return nil, err
+			}
+			return client.GetRegions(ctx)
+		},
+		controller: func(opts controller.ControllerOpts) (controller.Controller, error) {
+			return controller.NewTagController(opts)
+		},
+	}
+}
+
+func run(
+	ctx context.Context,
+	cfg *configuration.Configuration,
+	deps dependencies,
+) (report, error) {
+	// Apply the validated execution limit for every caller, including future API jobs.
+	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout())
+	defer cancel()
+	r := report{
+		Shutdown:  cfg.Shutdown(),
+		DryRun:    cfg.DryRun(),
+		Phase:     "planning",
+		StartedAt: time.Now().UTC(),
+		Regions:   make([]controller.Result, 0),
+	}
+	finish := func(err error) (report, error) {
+		r.FinishedAt = time.Now().UTC()
+		if err != nil {
+			r.Error = err.Error()
+		}
+		return r, err
+	}
+	regions := []string{*cfg.Region()}
+	if regions[0] == "" {
+		var err error
+		regions, err = deps.regions(ctx, cfg)
+		if err != nil {
+			return finish(err)
+		}
+	}
+	if len(regions) == 0 {
+		return finish(fmt.Errorf("no subscribed regions"))
+	}
+	// Freeze one instant for all regions, interpreted in the selected timezone.
+	sch := scheduler.NewAnykeyNLSchedulerAt(r.StartedAt, cfg.Timezone())
+	controllers := make([]controller.Controller, len(regions))
+	defer func() {
+		for _, c := range controllers {
+			if c != nil {
+				c.Close()
+			}
+		}
+	}()
+	r.Regions = make([]controller.Result, len(regions))
+	errs := make([]error, len(regions))
 	var wg sync.WaitGroup
 	for i, region := range regions {
-		log.Info("BEGIN SCALING IN REGION",
-			"Region", region,
-			"Order", i,
-			"Region Count", lc)
-
-		controllerOpts := controller.ControllerOpts{
-			ConfigurationProvider: cfg.Provider(),
-			TagNamespace:          cfg.TagNamespace(),
-			Scheduler:             sch,
-			SupportedActions:      *cfg.Action(),
-			LogFunc:               cfg.MakeLog,
-		}
-
-		controller, err := controller.NewTagController(controllerOpts)
-		if err != nil {
-			log.Error("Unable to create controller",
-				"error", err)
-		}
-		controller.SetRegion(region)
-		go controller.Run(&wg)
 		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, err := deps.controller(controller.ControllerOpts{
+				ConfigurationProvider: cfg.Provider(),
+				TagNamespace:          cfg.TagNamespace(),
+				Region:                &region,
+				Scheduler:             sch,
+				SupportedActions:      *cfg.Action(),
+				LogFunc:               cfg.MakeLog,
+				Shutdown:              cfg.Shutdown(),
+			})
+			if err != nil {
+				errs[i] = fmt.Errorf("%s: %w", region, err)
+				r.Regions[i] = controller.Result{
+					Region: region,
+					DryRun: true,
+					Error:  err.Error(),
+				}
+				return
+			}
+			controllers[i] = c
+			r.Regions[i], err = c.Plan(ctx)
+			if err != nil {
+				errs[i] = fmt.Errorf("%s: %w", region, err)
+			}
+		}()
+	}
+	// Join every region's planning work before allowing any region to submit writes.
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		r.Phase = "blocked"
+		return finish(err)
+	}
+	if err := ctx.Err(); err != nil {
+		r.Phase = "blocked"
+		return finish(err)
+	}
+	if cfg.DryRun() {
+		r.Phase = "dry_run"
+		return finish(nil)
+	}
+	r.Phase = "execution"
+	for i, c := range controllers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var err error
+			r.Regions[i], err = c.Execute(ctx, r.Regions[i])
+			if err != nil {
+				errs[i] = fmt.Errorf("%s: %w", regions[i], err)
+			}
+		}()
 	}
 	wg.Wait()
-
-	log.Info("Finished tasks",
-		"duration", time.Since(startTime))
+	return finish(errors.Join(errs...))
 }
 
-func setup() configuration.ConfigurationOpts {
-	c := configuration.ConfigurationOpts{}
-	// Add flag variables as first priority
-	c = addFlags(c)
-	// Add environment variables next
-	c = addEnvironment(c)
-
-	return c
-}
-
-func addFlags(c configuration.ConfigurationOpts) configuration.ConfigurationOpts {
-	opts := c
-
-	// TimeZone func
-	flag.Func("tz", "Timezone in a common format [ex. America/New York]",
-		func(s string) error {
-			opts.Timezone = &s
+// parseOptions uses a fresh FlagSet with explicit arguments instead of the global
+// flag.Parse so tests can supply arguments, environment values, and diagnostic
+// output without changing process globals. ContinueOnError returns parsing errors
+// to command, which controls JSON error output and exit codes without exiting here.
+// Execution defaults and semantic validation are applied by NewConfiguration.
+func parseOptions(
+	args []string,
+	env func(string) (string, bool),
+	errOut io.Writer,
+) (configuration.ConfigurationOpts, error) {
+	var opts configuration.ConfigurationOpts
+	fs := flag.NewFlagSet("oci-frugal", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	// Keep optional strings nil when neither source supplies a value. Loading the
+	// environment first lets flag parsing override it, including with an empty string.
+	stringFlag := func(target **string, name, key, usage string) {
+		if value, ok := env("FRUGAL_" + key); ok {
+			*target = &value
+		}
+		fs.Func(name, usage, func(value string) error {
+			*target = &value
 			return nil
 		})
-	// Actions funcs
-	flag.Func("action", "Action(s) to take on matching resources [all, on, off]",
-		func(s string) error {
-			opts.Action = &s
-			return nil
-		})
-
-	// Authentication type
-	authHelp := fmt.Sprintf("authentication type to use [%s, %s, %s, %s]",
-		configuration.APIKEY,
-		configuration.INSTANCEPRINCIPAL,
-		configuration.RESOURCEPRINCIPAL,
-		configuration.WORKLOADPRINCIPAL)
-	flag.Func("auth", authHelp, func(s string) error {
-		opts.Principal = &s
-		return nil
-	})
-
-	// Region
-	flag.Func("region", "region to run frugal on", func(s string) error {
-		opts.Region = &s
-		return nil
-	})
-
-	// Config File
-	flag.Func("config-file", "OCI configuration file to use", func(s string) error {
-		opts.ConfigFile = &s
-		return nil
-	})
-
-	// Config Profile
-	flag.Func("profile", "OCI configuration profile to use", func(s string) error {
-		opts.ConfigProfile = &s
-		return nil
-	})
-
-	// Private Key Password
-	flag.Func("key-pass", "password for private key linked to OCI config",
-		func(s string) error {
-			opts.KeyPassword = &s
-			return nil
-		})
-
-	// Log Level
-	flag.Func("v", "level to set logs", func(s string) error {
-		opts.LogLevel = &s
-		return nil
-	})
-
-	// Tag Namespace
-	flag.Func("tag", "Tag namespace to use for schedule", func(s string) error {
-		opts.TagNamespace = &s
-		return nil
-	})
-
-	flag.Parse()
-
-	return opts
-}
-
-func addEnvironment(c configuration.ConfigurationOpts) configuration.ConfigurationOpts {
-	opts := c
-
-	if opts.Timezone == nil {
-		opts.Timezone = checkEnv(PREFIX + TIMEZONE)
 	}
 
-	if opts.Action == nil {
-		opts.Action = checkEnv(PREFIX + ACTIONTYPE)
+	stringFlag(&opts.Timezone, "tz", "TIMEZONE", "Timezone, e.g. America/New_York")
+	stringFlag(&opts.Action, "action", "ACTION_TYPE", "Power filter: all, on, off")
+	stringFlag(
+		&opts.Principal, "auth", "AUTH_TYPE",
+		"Authentication: api_key, instance_principal, resource_principal, workload_principal",
+	)
+	stringFlag(
+		&opts.Region, "region", "REGION",
+		"Region; defaults to all subscribed regions",
+	)
+	stringFlag(&opts.ConfigFile, "config-file", "FILE", "OCI configuration file")
+	stringFlag(&opts.ConfigProfile, "profile", "PROFILE", "OCI configuration profile")
+	stringFlag(
+		&opts.KeyPassword, "key-pass", "KEY_PASS",
+		"Private key password (prefer FRUGAL_KEY_PASS)",
+	)
+	stringFlag(&opts.LogLevel, "v", "LOG_LEVEL", "Log level: debug, info, warn, error")
+	stringFlag(&opts.TagNamespace, "tag", "TAG_NAMESPACE", "Schedule tag namespace")
+
+	var envErr error
+	if v, ok := env("FRUGAL_DRY_RUN"); ok {
+		opts.DryRun, envErr = strconv.ParseBool(v)
 	}
-
-	if opts.Principal == nil {
-		opts.Principal = checkEnv(PREFIX + PRINCIPAL)
+	if envErr != nil {
+		return opts, fmt.Errorf("FRUGAL_DRY_RUN: %w", envErr)
 	}
-
-	if opts.Region == nil {
-		opts.Region = checkEnv(PREFIX + REGION)
+	stringFlag(
+		&opts.Shutdown, "shutdown", "SHUTDOWN",
+		fmt.Sprintf(
+			"Compute shutdown policy: soft or hard (default %s)",
+			configuration.DEFAULT_SHUTDOWN,
+		),
+	)
+	if value, ok := env("FRUGAL_TIMEOUT"); ok {
+		timeout, err := time.ParseDuration(value)
+		if err != nil {
+			return opts, fmt.Errorf("FRUGAL_TIMEOUT: %w", err)
+		}
+		opts.Timeout = &timeout
 	}
-
-	if opts.ConfigFile == nil {
-		opts.ConfigFile = checkEnv(PREFIX + FILE)
+	fs.BoolVar(
+		&opts.DryRun,
+		"dry-run",
+		opts.DryRun,
+		"Discover and validate power operations without changing resources",
+	)
+	fs.Func(
+		"timeout",
+		fmt.Sprintf(
+			"Maximum time for the complete run (default %s)",
+			configuration.DEFAULT_TIMEOUT,
+		),
+		func(value string) error {
+			timeout, err := time.ParseDuration(value)
+			if err == nil {
+				opts.Timeout = &timeout
+			}
+			return err
+		},
+	)
+	if err := fs.Parse(args); err != nil {
+		return opts, err
 	}
-
-	if opts.ConfigProfile == nil {
-		opts.ConfigProfile = checkEnv(PREFIX + PROFILE)
+	if fs.NArg() != 0 {
+		return opts, fmt.Errorf("unexpected positional arguments: %v", fs.Args())
 	}
-
-	if opts.KeyPassword == nil {
-		opts.KeyPassword = checkEnv(PREFIX + KEYPASS)
-	}
-
-	if opts.LogLevel == nil {
-		opts.LogLevel = checkEnv(PREFIX + LOGLEVEL)
-	}
-
-	if opts.TagNamespace == nil {
-		opts.TagNamespace = checkEnv(PREFIX + TAGNAMESPACE)
-	}
-
-	return opts
-}
-
-func checkEnv(key string) *string {
-	if v, ok := os.LookupEnv(key); ok {
-		return &v
-	}
-
-	return nil
+	return opts, nil
 }

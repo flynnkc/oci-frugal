@@ -54,7 +54,15 @@ func NewAnykeyNLSchedulerWithLocation(loc *time.Location) *AnykeyNLScheduler {
 	}
 
 	// Determine current time components based on configured scheduler timezone
-	now := time.Now().In(loc)
+	return NewAnykeyNLSchedulerAt(time.Now(), loc)
+}
+
+// NewAnykeyNLSchedulerAt freezes the evaluation time for a single run.
+func NewAnykeyNLSchedulerAt(at time.Time, loc *time.Location) *AnykeyNLScheduler {
+	if loc == nil {
+		loc = time.Local
+	}
+	now := at.In(loc)
 
 	return &AnykeyNLScheduler{
 		loc:  loc,
@@ -126,7 +134,9 @@ func (ts AnykeyNLScheduler) ActiveSchedule(tags any) (string, error) {
 		active = v
 	}
 	if v, ok := t[_DAYOFMO]; ok && strings.TrimSpace(v) != "" {
-		if rep, ok := dayOfMonthOverride(v, ts.dom); ok {
+		if rep, ok, err := dayOfMonthOverride(v, ts.dom); err != nil {
+			return "", err
+		} else if ok {
 			active = rep
 		}
 	}
@@ -175,32 +185,17 @@ func (ts AnykeyNLScheduler) parseSchedule(sch string, hour int) (action.Action,
 		return act, ErrInvalidTokenCount{Expected: 24, Got: len(tokens)}
 	}
 
-	want := tokens[hour]
-	if want == "" || want == "*" {
-		return act, nil
-	}
-
-	// Parenthesized tokens are not supported at this layer
-	if strings.HasPrefix(want, "(") && strings.HasSuffix(want, ")") {
-		return act, ErrUnsupportedToken{Token: want}
-	}
-
-	wantInt, err := strconv.Atoi(want)
-	if err != nil {
-		return act, ErrInvalidToken{Token: want, Reason: err.Error()}
-	}
-
-	// Map numeric to action
-	switch {
-	case wantInt <= 0:
-		act = action.OFF
-	case wantInt == 1:
-		act = action.ON
-	default:
-		if wantInt > 127 {
-			wantInt = 127 // clamp to int8
+	// Validate the whole schedule before permitting any power action.
+	for _, token := range tokens {
+		if token != "0" && token != "1" && token != "*" {
+			return act, ErrUnsupportedToken{Token: token}
 		}
-		act = action.ToAction(wantInt)
+	}
+	switch tokens[hour] {
+	case "0":
+		act = action.OFF
+	case "1":
+		act = action.ON
 	}
 
 	return act, nil
@@ -233,40 +228,33 @@ func nthInMonth(t time.Time) int {
 // dayOfMonthOverride parses a DayOfMonth schedule value like "1:0,15:1" and
 // if the current day matches, returns a repeated 24-hour schedule string
 // like "1,1,1,..." and true. Otherwise returns "", false.
-func dayOfMonthOverride(v string, today int) (string, bool) {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return "", false
-	}
-	parts := strings.Split(v, ",")
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		kv := strings.SplitN(p, ":", 2)
+func dayOfMonthOverride(v string, today int) (string, bool, error) {
+	v = strings.TrimSpace(strings.SplitN(v, "#", 2)[0])
+	seen := make(map[int]bool)
+	active := ""
+	for _, pair := range strings.Split(v, ",") {
+		kv := strings.Split(pair, ":")
 		if len(kv) != 2 {
-			// invalid pair is a hard error in strict mode; keep backward compatible by ignoring here
-			// and let overall schedule validation catch issues if chosen.
-			continue
-		}
-		dstr := strings.TrimSpace(kv[0])
-		val := strings.TrimSpace(kv[1])
-		d, err := strconv.Atoi(dstr)
-		if err != nil {
-			continue
-		}
-		if d == today {
-			// Build a 24-token repeated schedule
-			if val == "" {
-				return "", false
+			return "", false, ErrInvalidToken{
+				Token:  pair,
+				Reason: "expected day:0, day:1, or day:*",
 			}
-			tokens := make([]string, 24)
-			for i := range tokens {
-				tokens[i] = val
+		}
+		day, err := strconv.Atoi(strings.TrimSpace(kv[0]))
+		value := strings.TrimSpace(kv[1])
+		if err != nil || day < 1 || day > 31 || seen[day] {
+			return "", false, ErrInvalidToken{
+				Token:  pair,
+				Reason: "day must be unique and between 1 and 31",
 			}
-			return strings.Join(tokens, ","), true
+		}
+		seen[day] = true
+		if value != "0" && value != "1" && value != "*" {
+			return "", false, ErrUnsupportedToken{Token: value}
+		}
+		if day == today {
+			active = strings.TrimSuffix(strings.Repeat(value+",", 24), ",")
 		}
 	}
-	return "", false
+	return active, active != "", nil
 }

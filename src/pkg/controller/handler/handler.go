@@ -2,400 +2,405 @@ package handler
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"log/slog"
-	"time"
+	"strings"
 
 	"github.com/flynnkc/oci-frugal/src/pkg/action"
 	"github.com/flynnkc/oci-frugal/src/pkg/controller/task"
-	tokenpool "github.com/flynnkc/token-pool"
+	"github.com/flynnkc/oci-frugal/src/pkg/ociapi"
 	"github.com/oracle/oci-go-sdk/v65/analytics"
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/core"
 	"github.com/oracle/oci-go-sdk/v65/database"
-	"github.com/oracle/oci-go-sdk/v65/integration"
-	"github.com/oracle/oci-go-sdk/v65/resourcesearch"
-	rs "github.com/oracle/oci-go-sdk/v65/resourcesearch"
 )
 
-const (
-	DEFAULT_INTERVAL     time.Duration = 15 * time.Second
-	MAX_INTERVAL         time.Duration = 3 * time.Minute
-	DEFAULT_MAX_REQUESTS int           = 8
-)
+// Operation describes one concrete power request. Submitted means OCI accepted
+// the request; it does not imply that the asynchronous transition has completed.
+type Operation struct {
+	ID        string `json:"id"`
+	ParentID  string `json:"parent_id,omitempty"`
+	Type      string `json:"type"`
+	Action    string `json:"action"`
+	State     string `json:"state,omitempty"`
+	Status    string `json:"status"`
+	Message   string `json:"message,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+}
 
 type Handler interface {
-	HandleResource(task.Task) error
+	Plan(context.Context, task.Task) ([]Operation, error)
+	Execute(context.Context, Operation) (Operation, error)
 	SetRegion(string)
 }
 
-type HandlerOpts struct {
-	ConfigProvider  common.ConfigurationProvider
-	Logger          *slog.Logger
-	MaxRequests     *int
-	RequestInterval *time.Duration // 1-30 Seconds
+type ComputeAPI interface {
+	GetInstance(context.Context, core.GetInstanceRequest) (core.GetInstanceResponse, error)
+	InstanceAction(
+		context.Context,
+		core.InstanceActionRequest,
+	) (core.InstanceActionResponse, error)
+	SetRegion(string)
+}
+type DatabaseAPI interface {
+	GetDbSystem(
+		context.Context,
+		database.GetDbSystemRequest,
+	) (database.GetDbSystemResponse, error)
+	ListDbNodes(
+		context.Context,
+		database.ListDbNodesRequest,
+	) (database.ListDbNodesResponse, error)
+	GetDbNode(context.Context, database.GetDbNodeRequest) (database.GetDbNodeResponse, error)
+	DbNodeAction(
+		context.Context,
+		database.DbNodeActionRequest,
+	) (database.DbNodeActionResponse, error)
+	SetRegion(string)
+}
+type AnalyticsAPI interface {
+	GetAnalyticsInstance(
+		context.Context,
+		analytics.GetAnalyticsInstanceRequest,
+	) (analytics.GetAnalyticsInstanceResponse, error)
+	StartAnalyticsInstance(
+		context.Context,
+		analytics.StartAnalyticsInstanceRequest,
+	) (analytics.StartAnalyticsInstanceResponse, error)
+	StopAnalyticsInstance(
+		context.Context,
+		analytics.StopAnalyticsInstanceRequest,
+	) (analytics.StopAnalyticsInstanceResponse, error)
+	SetRegion(string)
 }
 
 type ResourceHandler struct {
-	analytics   analytics.AnalyticsClient
-	compute     core.ComputeClient
-	database    database.DatabaseClient
-	integration integration.IntegrationInstanceClient
-	search      resourcesearch.ResourceSearchClient
-	log         *slog.Logger
-	tp          *tokenpool.TokenPool
+	compute   ComputeAPI
+	database  DatabaseAPI
+	analytics AnalyticsAPI
+	limiter   ociapi.Limiter
+	shutdown  core.InstanceActionActionEnum
+}
+
+type HandlerOpts struct {
+	ConfigProvider common.ConfigurationProvider
+	Limiter        ociapi.Limiter
+	Shutdown       string
 }
 
 func NewResourceHandler(opts HandlerOpts) (*ResourceHandler, error) {
-	h := ResourceHandler{}
-
-	if opts.Logger != nil {
-		h.log = opts.Logger
-	} else {
-		h.log = slog.Default()
-		h.log.Warn("Handler Logger set to Default")
+	if opts.ConfigProvider == nil || opts.Limiter == nil {
+		return nil, fmt.Errorf("provider and limiter are required")
 	}
-
-	h.log.Debug("Creating Handler")
-
-	if opts.MaxRequests == nil {
-		opts.MaxRequests = common.Int(DEFAULT_MAX_REQUESTS)
+	shutdown := core.InstanceActionActionSoftstop
+	switch opts.Shutdown {
+	case "", "soft":
+	case "hard":
+		shutdown = core.InstanceActionActionStop
+	default:
+		return nil, fmt.Errorf("invalid shutdown policy %q", opts.Shutdown)
 	}
-
-	if opts.RequestInterval == nil {
-		t := DEFAULT_INTERVAL
-		opts.RequestInterval = &t
-	}
-
-	h.tp = tokenpool.NewTokenPool(*opts.MaxRequests, *opts.MaxRequests, *opts.RequestInterval)
-
-	if opts.ConfigProvider == nil {
-		return nil, fmt.Errorf("error Handler cannot have nil ConfigProvider")
-	}
-
-	cp := opts.ConfigProvider
-
-	// Compute
-	instance, err := core.NewComputeClientWithConfigurationProvider(cp)
+	compute, err := core.NewComputeClientWithConfigurationProvider(opts.ConfigProvider)
 	if err != nil {
 		return nil, err
 	}
-	h.compute = instance
-
-	// Database
-	db, err := database.NewDatabaseClientWithConfigurationProvider(cp)
+	db, err := database.NewDatabaseClientWithConfigurationProvider(opts.ConfigProvider)
 	if err != nil {
 		return nil, err
 	}
-	h.database = db
-
-	// Analytics Cloud
-	a, err := analytics.NewAnalyticsClientWithConfigurationProvider(cp)
+	a, err := analytics.NewAnalyticsClientWithConfigurationProvider(opts.ConfigProvider)
 	if err != nil {
 		return nil, err
 	}
-	h.analytics = a
-
-	// Integration Cloud
-	i, err := integration.NewIntegrationInstanceClientWithConfigurationProvider(cp)
-	if err != nil {
-		return nil, err
-	}
-	h.integration = i
-
-	// Search (Required for DbSystems)
-	s, err := rs.NewResourceSearchClientWithConfigurationProvider(cp)
-	if err != nil {
-		return nil, err
-	}
-	h.search = s
-
-	return &h, nil
+	return &ResourceHandler{
+		compute:   &compute,
+		database:  &db,
+		analytics: &a,
+		limiter:   opts.Limiter,
+		shutdown:  shutdown,
+	}, nil
 }
 
 func (h *ResourceHandler) SetRegion(region string) {
-	h.analytics.SetRegion(region)
 	h.compute.SetRegion(region)
 	h.database.SetRegion(region)
-	h.integration.SetRegion(region)
-	h.search.SetRegion(region)
+	h.analytics.SetRegion(region)
 }
 
-// HandleResource routes task to the appropriate handler
-func (h *ResourceHandler) HandleResource(t task.Task) error {
-	h.log.Debug("Handling Resource",
-		"Type", *t.Resource.ResourceType)
-	if t.Resource.ResourceType == nil {
-		return fmt.Errorf("nil resource")
-	}
-
-	// Require token for rate limiting
-	ctx, cancel := context.WithTimeout(context.Background(), MAX_INTERVAL)
-	defer cancel()
-	h.tp.Acquire(ctx)
-
-	switch *t.Resource.ResourceType {
-	case "Instance":
-		return h.handleCompute(t)
-	case "DbSystem":
-		return h.handleDbSystem(t)
-	case "AnalyticsInstance":
-		return h.handleAnalyticsInstance(t)
-	}
-
-	return nil
+func Supported(kind string) bool {
+	return kind == "Instance" || kind == "DbSystem" || kind == "AnalyticsInstance"
 }
 
-// HandleCompute takes actions on compute resources. Limited to turning instance
-// on or off.
-func (h *ResourceHandler) handleCompute(t task.Task) error {
-	logGroup := getResourceGroup(t)
-
-	h.log.Debug("Handling Compute", logGroup)
-
-	// Turn off if action is off and instance is not already off
-	if t.Action == action.OFF && (*t.Resource.LifecycleState != "STOPPED" &&
-		*t.Resource.LifecycleState != "STOPPING" &&
-		*t.Resource.LifecycleState != "TERMINATING" &&
-		*t.Resource.LifecycleState != "TERMINATED") {
-		ctx, cancel := context.WithTimeout(context.Background(), DEFAULT_INTERVAL)
-		defer cancel()
-
-		req := core.InstanceActionRequest{
-			InstanceId: t.Resource.Identifier,
-			Action:     core.InstanceActionActionStop,
-		}
-
-		resp, err := h.compute.InstanceAction(ctx, req)
+func (h *ResourceHandler) Plan(ctx context.Context, t task.Task) ([]Operation, error) {
+	if t.Action != action.ON && t.Action != action.OFF {
+		return nil, fmt.Errorf("invalid power action %v", t.Action)
+	}
+	if t.Resource.Identifier == nil ||
+		*t.Resource.Identifier == "" ||
+		t.Resource.ResourceType == nil {
+		return nil, fmt.Errorf("resource ID and type are required")
+	}
+	op := Operation{
+		ID:     *t.Resource.Identifier,
+		Type:   *t.Resource.ResourceType,
+		Action: t.Action.String(),
+	}
+	if !Supported(op.Type) {
+		return nil, fmt.Errorf("unsupported resource type %q", op.Type)
+	}
+	if op.Type != "DbSystem" {
+		op, err := h.inspect(ctx, op)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		h.log.Info("Compute Handled",
-			slog.String("Action", "STOP"),
-			slog.String("Status Message", resp.RawResponse.Status),
-			logGroup)
-
-	} else if t.Action == action.ON && (*t.Resource.LifecycleState != "RUNNING" &&
-		*t.Resource.LifecycleState != "STARTING" &&
-		*t.Resource.LifecycleState != "TERMINATING" &&
-		*t.Resource.LifecycleState != "TERMINATED") {
-		// Else turn on -- no vertical scaling supported at this time
-		ctx, cancel := context.WithTimeout(context.Background(), DEFAULT_INTERVAL)
-		defer cancel()
-
-		req := core.InstanceActionRequest{
-			InstanceId: t.Resource.Identifier,
-			Action:     core.InstanceActionActionStart,
-		}
-
-		resp, err := h.compute.InstanceAction(ctx, req)
-		if err != nil {
-			return err
-		}
-		h.log.Info("Compute Handled",
-			slog.String("Action", "START"),
-			slog.String("Status Message", resp.RawResponse.Status),
-			logGroup)
-	} else {
-		h.log.Info("Compute Handled - No Action Required",
-			slog.String("State", *t.Resource.LifecycleState),
-			slog.String("Action", "NONE"), logGroup)
+		return []Operation{op}, nil
 	}
-
-	return nil
-}
-
-// handleDbSystem starts or stops Database Node resources.
-func (h *ResourceHandler) handleDbSystem(t task.Task) error {
-	nodes := h.getDbNodes(t.Resource.Identifier)
-
-	// helper to safely dereference pointers for error messages
-	str := func(p *string) string {
-		if p == nil {
-			return "<nil>"
-		}
-		return *p
+	if t.Resource.CompartmentId == nil || *t.Resource.CompartmentId == "" {
+		return nil, fmt.Errorf("DB system compartment is required")
 	}
-
-	var errs []error
-
-	for _, node := range nodes {
-		logGroup := getResourceGroup(task.NewTask(t.Action, node))
-		h.log.Debug("Handling DB Node", logGroup)
-
-		// Turn DB Node Off
-		if t.Action == action.OFF && (*node.LifecycleState != "STOPPED" &&
-			*node.LifecycleState != "STOPPING" &&
-			*node.LifecycleState != "TERMINATING" &&
-			*node.LifecycleState != "TERMINATED") {
-			ctx, cancel := context.WithTimeout(context.Background(), DEFAULT_INTERVAL)
-
-			req := database.DbNodeActionRequest{
-				DbNodeId: node.Identifier,
-				Action:   database.DbNodeActionActionStop,
-			}
-
-			resp, err := h.database.DbNodeAction(ctx, req)
-			cancel()
-			if err != nil {
-				errs = append(errs, fmt.Errorf(
-					"stop dbnode %s (dbSystem %s, state %s) failed: %w",
-					str(node.Identifier), str(t.Resource.Identifier), str(node.LifecycleState), err,
-				))
-				continue
-			}
-
-			h.log.Info("Handled DB Node",
-				slog.String("Action", "STOP"),
-				slog.String("Status", resp.RawResponse.Status),
-				logGroup)
-		} else if t.Action == action.ON && (*node.LifecycleState != "RUNNING" &&
-			*node.LifecycleState != "STARTING" &&
-			*node.LifecycleState != "TERMINATING" &&
-			*node.LifecycleState != "TERMINATED") {
-			// Turn DB Node On
-			ctx, cancel := context.WithTimeout(context.Background(), DEFAULT_INTERVAL)
-
-			req := database.DbNodeActionRequest{
-				DbNodeId: node.Identifier,
-				Action:   database.DbNodeActionActionStart,
-			}
-
-			resp, err := h.database.DbNodeAction(ctx, req)
-			cancel()
-			if err != nil {
-				errs = append(errs, fmt.Errorf(
-					"start dbnode %s (dbSystem %s, state %s) failed: %w",
-					str(node.Identifier), str(t.Resource.Identifier), str(node.LifecycleState), err,
-				))
-				continue
-			}
-
-			h.log.Info("Handled DB Node",
-				slog.String("Action", "START"),
-				slog.String("Status", resp.RawResponse.Status),
-				logGroup)
-		} else {
-			h.log.Info("DB Node Handled - No Action Required",
-				slog.String("State", *t.Resource.LifecycleState),
-				slog.String("Action", "NONE"), logGroup)
-		}
+	system, err := ociapi.Call(
+		ctx,
+		h.limiter,
+		func(ctx context.Context) (database.GetDbSystemResponse, error) {
+			return h.database.GetDbSystem(ctx, database.GetDbSystemRequest{DbSystemId: &op.ID})
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get DB system: %w", err)
 	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf(
-			"dbSystem %s: one or more DB node actions failed: %w",
-			str(t.Resource.Identifier), errors.Join(errs...),
+	if system.Shape == nil || !strings.HasPrefix(*system.Shape, "VM.") {
+		return nil, fmt.Errorf(
+			"power scheduling supports VM DB systems only; shape %q is unsupported",
+			value(system.Shape),
 		)
 	}
-
-	return nil
+	req := database.ListDbNodesRequest{
+		CompartmentId: t.Resource.CompartmentId,
+		DbSystemId:    t.Resource.Identifier,
+		Limit:         common.Int(1000),
+	}
+	ops := make([]Operation, 0)
+	seenPages := make(map[string]bool)
+	seenNodes := make(map[string]bool)
+	for {
+		resp, err := ociapi.Call(
+			ctx,
+			h.limiter,
+			func(ctx context.Context) (database.ListDbNodesResponse, error) {
+				return h.database.ListDbNodes(ctx, req)
+			},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("list DB nodes: %w", err)
+		}
+		for _, node := range resp.Items {
+			if node.Id == nil || *node.Id == "" {
+				return nil, fmt.Errorf("DB node missing ID")
+			}
+			if seenNodes[*node.Id] {
+				continue
+			}
+			seenNodes[*node.Id] = true
+			n := Operation{
+				ID:       *node.Id,
+				ParentID: op.ID,
+				Type:     "DbNode",
+				Action:   op.Action,
+				State:    string(node.LifecycleState),
+			}
+			n, err = classify(n)
+			if err != nil {
+				return nil, err
+			}
+			ops = append(ops, n)
+		}
+		if resp.OpcNextPage == nil || *resp.OpcNextPage == "" {
+			break
+		}
+		if seenPages[*resp.OpcNextPage] {
+			return nil, fmt.Errorf("repeated DB node pagination token")
+		}
+		seenPages[*resp.OpcNextPage] = true
+		req.Page = resp.OpcNextPage
+	}
+	if len(ops) == 0 {
+		return nil, fmt.Errorf("DB system %s has no discoverable nodes", op.ID)
+	}
+	return ops, nil
 }
 
-// handleAnalyticsInstance activates/deactivates OAC instances
-func (h *ResourceHandler) handleAnalyticsInstance(t task.Task) error {
-	logGroup := getResourceGroup(t)
-
-	h.log.Debug("Handling Analytics Instance", logGroup)
-
-	// Deactivate Analytics Instance
-	if t.Action == action.OFF && *t.Resource.LifecycleState != "Inactive" &&
-		*t.Resource.LifecycleState != "DELETED" {
-		ctx, cancel := context.WithTimeout(context.Background(), DEFAULT_INTERVAL)
-		defer cancel()
-
-		req := analytics.StopAnalyticsInstanceRequest{
-			AnalyticsInstanceId: t.Resource.Identifier,
-		}
-
-		resp, err := h.analytics.StopAnalyticsInstance(ctx, req)
+func (h *ResourceHandler) inspect(ctx context.Context, op Operation) (Operation, error) {
+	switch op.Type {
+	case "Instance":
+		r, err := ociapi.Call(
+			ctx,
+			h.limiter,
+			func(ctx context.Context) (core.GetInstanceResponse, error) {
+				return h.compute.GetInstance(ctx, core.GetInstanceRequest{InstanceId: &op.ID})
+			},
+		)
 		if err != nil {
-			return err
+			return op, err
 		}
-
-		h.log.Info("Stopped Analytics Instance",
-			slog.String("Action", "STOP"),
-			slog.String("Status", resp.RawResponse.Status),
-			logGroup)
-	} else if t.Action == action.ON && *t.Resource.LifecycleState != "RUNNING" &&
-		*t.Resource.LifecycleState != "DELETED" {
-		ctx, cancel := context.WithTimeout(context.Background(), DEFAULT_INTERVAL)
-		defer cancel()
-
-		req := analytics.StartAnalyticsInstanceRequest{
-			AnalyticsInstanceId: t.Resource.Identifier,
-		}
-
-		resp, err := h.analytics.StartAnalyticsInstance(ctx, req)
+		op.State = string(r.LifecycleState)
+	case "DbNode":
+		r, err := ociapi.Call(
+			ctx,
+			h.limiter,
+			func(ctx context.Context) (database.GetDbNodeResponse, error) {
+				return h.database.GetDbNode(ctx, database.GetDbNodeRequest{DbNodeId: &op.ID})
+			},
+		)
 		if err != nil {
-			return err
+			return op, err
 		}
+		op.State = string(r.LifecycleState)
+	case "AnalyticsInstance":
+		r, err := ociapi.Call(
+			ctx,
+			h.limiter,
+			func(ctx context.Context) (analytics.GetAnalyticsInstanceResponse, error) {
+				return h.analytics.GetAnalyticsInstance(
+					ctx,
+					analytics.GetAnalyticsInstanceRequest{
+						AnalyticsInstanceId: &op.ID,
+					},
+				)
+			},
+		)
+		if err != nil {
+			return op, err
+		}
+		op.State = string(r.LifecycleState)
+	default:
+		return op, fmt.Errorf("unsupported resource type %q", op.Type)
+	}
+	return classify(op)
+}
 
-		h.log.Info("Started Analytics Instance",
-			slog.String("Action", "START"),
-			slog.String("Status", resp.RawResponse.Status),
-			logGroup)
+func classify(op Operation) (Operation, error) {
+	if op.ID == "" || (op.Action != "on" && op.Action != "off") {
+		return op, fmt.Errorf("invalid power operation")
+	}
+	var on, off string
+	switch op.Type {
+	case "Instance":
+		on, off = "RUNNING", "STOPPED"
+	case "DbNode":
+		on, off = "AVAILABLE", "STOPPED"
+	case "AnalyticsInstance":
+		on, off = "ACTIVE", "INACTIVE"
+	default:
+		return op, fmt.Errorf("unsupported resource type %q", op.Type)
+	}
+	op.Message = ""
+	if (op.Action == "on" && op.State == on) || (op.Action == "off" && op.State == off) {
+		op.Status = "noop"
+		op.Message = "already in desired state"
+	} else if op.State == on || op.State == off {
+		op.Status = "planned"
 	} else {
-		h.log.Info("Analytics Instance Handled - No Action Required",
-			slog.String("Action", "NONE"),
-			slog.String("State", *t.Resource.LifecycleState),
-			logGroup)
+		return op, fmt.Errorf(
+			"resource %s is in non-actionable state %q; "+
+				"retry after the transition or resolve the resource state",
+			op.ID,
+			op.State,
+		)
 	}
-
-	return nil
+	return op, nil
 }
 
-func getResourceGroup(t task.Task) slog.Attr {
-	return slog.Group("Resource",
-		slog.String("ID", *t.Resource.Identifier),
-		slog.String("Type", *t.Resource.ResourceType),
-		slog.Int("Action", int(t.Action)),
-		slog.String("State", *t.Resource.LifecycleState),
-	)
-}
-
-func (h *ResourceHandler) getDbNodes(id *string) []rs.ResourceSummary {
-	nodes := make([]rs.ResourceSummary, 0)
-
-	query := fmt.Sprintf(
-		"query dbnode resources return alladditionalfields where dbSystemId = '%s'",
-		*id)
-
-	h.log.Debug("Searching for DbSystem Nodes",
-		slog.String("Query", query),
-		slog.String("DbSystem ID", *id))
-
-	details := rs.StructuredSearchDetails{
-		Query: common.String(query),
-	}
-
-	req := rs.SearchResourcesRequest{
-		SearchDetails: details,
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), DEFAULT_INTERVAL)
-	defer cancel()
-	resp, err := h.search.SearchResources(ctx, req)
+func (h *ResourceHandler) Execute(ctx context.Context, op Operation) (Operation, error) {
+	// Re-read state before every write; discovery and dry-run states can be stale.
+	current, err := h.inspect(ctx, op)
 	if err != nil {
-		h.log.Error("Error searching for DB Nodes",
-			"error", err)
-		return nodes
-	} else if resp.RawResponse.StatusCode > 299 || resp.RawResponse.StatusCode < 200 {
-		h.log.Error("Error searching for DB nodes: invalid status in response",
-			slog.Int("code", resp.RawResponse.StatusCode))
+		op.Status = "failed"
+		op.Message = err.Error()
+		return op, err
 	}
-
-	for _, item := range resp.Items {
-		h.log.Debug("appending item",
-			slog.String("DB System", *id),
-			slog.String("Node", *item.Identifier))
-		nodes = append(nodes, item)
+	op = current
+	if op.Status == "noop" {
+		return op, nil
 	}
+	switch op.Type {
+	case "Instance":
+		a := h.shutdown
+		if op.Action == "on" {
+			a = core.InstanceActionActionStart
+		}
+		r, e := ociapi.Call(
+			ctx,
+			h.limiter,
+			func(ctx context.Context) (core.InstanceActionResponse, error) {
+				return h.compute.InstanceAction(ctx, core.InstanceActionRequest{
+					InstanceId: &op.ID,
+					Action:     a,
+				})
+			},
+		)
+		err = e
+		op.RequestID = value(r.OpcRequestId)
+	case "DbNode":
+		a := database.DbNodeActionActionStop
+		if op.Action == "on" {
+			a = database.DbNodeActionActionStart
+		}
+		r, e := ociapi.Call(
+			ctx,
+			h.limiter,
+			func(ctx context.Context) (database.DbNodeActionResponse, error) {
+				return h.database.DbNodeAction(ctx, database.DbNodeActionRequest{
+					DbNodeId: &op.ID,
+					Action:   a,
+				})
+			},
+		)
+		err = e
+		op.RequestID = value(r.OpcRequestId)
+	case "AnalyticsInstance":
+		if op.Action == "on" {
+			r, e := ociapi.Call(
+				ctx,
+				h.limiter,
+				func(ctx context.Context) (analytics.StartAnalyticsInstanceResponse, error) {
+					return h.analytics.StartAnalyticsInstance(
+						ctx,
+						analytics.StartAnalyticsInstanceRequest{
+							AnalyticsInstanceId: &op.ID,
+						},
+					)
+				},
+			)
+			err = e
+			op.RequestID = value(r.OpcRequestId)
+		} else {
+			r, e := ociapi.Call(
+				ctx,
+				h.limiter,
+				func(ctx context.Context) (analytics.StopAnalyticsInstanceResponse, error) {
+					return h.analytics.StopAnalyticsInstance(
+						ctx,
+						analytics.StopAnalyticsInstanceRequest{
+							AnalyticsInstanceId: &op.ID,
+						},
+					)
+				},
+			)
+			err = e
+			op.RequestID = value(r.OpcRequestId)
+		}
+	}
+	if err != nil {
+		op.Status = "failed"
+		op.Message = err.Error()
+		return op, err
+	}
+	op.Status = "submitted"
+	return op, nil
+}
 
-	h.log.Debug("Returning search for DB Nodes",
-		slog.String("DB System", *id),
-		slog.Int("Count", len(nodes)))
-
-	return nodes
+func value(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }

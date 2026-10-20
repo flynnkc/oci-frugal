@@ -1,0 +1,29 @@
+name: Go checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Formatting
+        run: test -z "$(gofmt -l src)"
+      - name: Tests and race detection
+        run: go test -race -cover ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: go build -o /tmp/oci-frugal ./src

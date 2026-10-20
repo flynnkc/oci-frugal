@@ -10,11 +10,20 @@ const (
 // Action defines which behaviors should be applied to resources
 type Action uint8
 
-// ToAction turns an int to an Action
-func ToAction(i int) Action {
-	return Action(i)
+// Compare checks an execution filter against a concrete power action.
+func Compare(filter Action, decision Action) bool {
+	return (decision == ON || decision == OFF) && (filter == ALL || filter == decision)
 }
 
-func Compare(a Action, b Action) bool {
-	return (a & b) > 0
+func (a Action) String() string {
+	switch a {
+	case ON:
+		return "on"
+	case OFF:
+		return "off"
+	case ALL:
+		return "all"
+	default:
+		return "none"
+	}
 }

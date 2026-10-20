@@ -30,7 +30,7 @@ func logFactory(w io.Writer, opts *slog.HandlerOptions, handlerType int8) *slog.
 }
 
 func makeStdJSONLogger(opts *slog.HandlerOptions) *slog.Logger {
-	return logFactory(os.Stdout, opts, JSON_HANDLER)
+	return logFactory(os.Stderr, opts, JSON_HANDLER)
 }
 
 func StdJsonLoggerLevel(level slog.Level) *slog.Logger {
@@ -62,7 +62,7 @@ func StdJsonLoggerError(with ...any) *slog.Logger {
 }
 
 func makeStdTextLogger(opts *slog.HandlerOptions) *slog.Logger {
-	return logFactory(os.Stdout, opts, TEXT_HANDLER)
+	return logFactory(os.Stderr, opts, TEXT_HANDLER)
 }
 
 func StdTextLoggerLevel(level slog.Level) *slog.Logger {

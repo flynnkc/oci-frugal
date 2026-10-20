@@ -2,239 +2,298 @@ package controller
 
 import (
 	"context"
-	"log/slog"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/flynnkc/oci-frugal/src/pkg/action"
 	"github.com/flynnkc/oci-frugal/src/pkg/controller/handler"
 	"github.com/flynnkc/oci-frugal/src/pkg/controller/task"
+	"github.com/flynnkc/oci-frugal/src/pkg/ociapi"
 	"github.com/flynnkc/oci-frugal/src/pkg/scheduler"
 	"github.com/oracle/oci-go-sdk/v65/common"
 	rs "github.com/oracle/oci-go-sdk/v65/resourcesearch"
 )
 
 const (
-	QUERY         string = "query instance, dbsystem, autonomousdatabase, analyticsinstance, integrationinstance resources"
-	TC_WORK_QUEUE uint8  = 8
-	TC_TIMEOUT           = 5 * time.Second
+	// Keep unimplemented advertised types discoverable so they produce explicit
+	// errors when tagged for an action, rather than silently disappearing.
+	QUERY = "query instance, dbsystem, autonomousdatabase, " +
+		"analyticsinstance, integrationinstance resources"
+	TC_WORK_QUEUE = 8
 )
 
-// TagController keeps track of all clients and scheduler interface for managing
-// access, decisions, and actions on resources. Uses tags to manage schedules.
+type SearchAPI interface {
+	SearchResources(
+		context.Context,
+		rs.SearchResourcesRequest,
+	) (rs.SearchResourcesResponse, error)
+	SetRegion(string)
+}
+
 type TagController struct {
 	tagNamespace string
 	region       string
 	scheduler    scheduler.Scheduler
 	action       action.Action
 	handler      handler.Handler
-	search       rs.ResourceSearchClient
-	log          *slog.Logger
+	search       SearchAPI
+	limiter      ociapi.Limiter
+	close        func()
 }
 
-// NewController initializes client snad returns a valid controller.
-// If any clients fail to initialze, return nil controller and error.
+var _ Controller = (*TagController)(nil)
+
 func NewTagController(opts ControllerOpts) (*TagController, error) {
-	// Verify required variables
-	if opts.TagNamespace == nil || opts.ConfigurationProvider == nil {
+	if opts.TagNamespace == nil ||
+		*opts.TagNamespace == "" ||
+		opts.ConfigurationProvider == nil ||
+		opts.Scheduler == nil {
 		return nil, ErrControllerOptions
 	}
-
-	c := TagController{
-		tagNamespace: *opts.TagNamespace,
-		action:       opts.SupportedActions,
+	if opts.SupportedActions != action.ALL &&
+		opts.SupportedActions != action.ON &&
+		opts.SupportedActions != action.OFF {
+		return nil, ErrControllerOptions
 	}
-
-	handlerOpts := handler.HandlerOpts{
+	limiter := ociapi.NewLimiter()
+	h, err := handler.NewResourceHandler(handler.HandlerOpts{
 		ConfigProvider: opts.ConfigurationProvider,
-		Logger:         opts.LogFunc("Component", "Handler"),
-	}
-
-	h, err := handler.NewResourceHandler(handlerOpts)
+		Limiter:        limiter,
+		Shutdown:       opts.Shutdown,
+	})
 	if err != nil {
+		limiter.Close()
 		return nil, err
 	}
-	c.handler = h
-
-	// Prefer an expicit log but set default log if needed
-	if opts.LogFunc != nil {
-		c.log = opts.LogFunc("Component", "TagController")
-	} else {
-		c.log = slog.Default()
-	}
-
-	// Resource Search
-	s, err := rs.NewResourceSearchClientWithConfigurationProvider(
-		opts.ConfigurationProvider)
+	s, err := rs.NewResourceSearchClientWithConfigurationProvider(opts.ConfigurationProvider)
 	if err != nil {
+		limiter.Close()
 		return nil, err
 	}
-	c.search = s
-
-	// Default to null scheduler as last resort
-	if opts.Scheduler != nil {
-		c.scheduler = opts.Scheduler
-	} else {
-		c.scheduler = &scheduler.NullScheduler{}
+	c := &TagController{
+		tagNamespace: *opts.TagNamespace,
+		scheduler:    opts.Scheduler,
+		action:       opts.SupportedActions,
+		handler:      h,
+		search:       &s,
+		limiter:      limiter,
+		close:        limiter.Close,
 	}
-
-	return &c, nil
+	if opts.Region != nil {
+		c.SetRegion(*opts.Region)
+	}
+	return c, nil
 }
-
-// SetScheduler sets the scheduler to be used for parsing run schedules
-func (tc *TagController) SetScheduler(sch scheduler.Scheduler) *TagController {
-	tc.log.Debug("setting new scheduler",
-		"type", sch.Type())
-
-	tc.scheduler = sch
-	return tc
+func (tc *TagController) Close() {
+	if tc.close != nil {
+		tc.close()
+	}
 }
-
-// Search generates a structured search and returns a resource summary collection
-func (tc *TagController) Search(query string) (rs.ResourceSummaryCollection, error) {
-	rsc := rs.ResourceSummaryCollection{Items: make([]rs.ResourceSummary, 0)}
-
-	tc.log.Debug("searching for resources",
-		"query", query)
-	details := rs.StructuredSearchDetails{
-		Query: common.String(query),
-	}
-
-	// Return as many results in each result to minimize number of requests required
-	request := rs.SearchResourcesRequest{
-		SearchDetails: details,
-		Limit:         common.Int(1000),
-	}
-
-	// Set context via wrapping SearchResources
-	searchFunc := func(request rs.SearchResourcesRequest) (rs.SearchResourcesResponse,
-		error) {
-		ctx, cancel := context.WithTimeout(context.Background(), TC_TIMEOUT)
-		defer cancel()
-
-		return tc.search.SearchResources(ctx, request)
-	}
-
-	// Pagination by breaking when no next page
-	tc.log.Debug("preparing to send search requests")
-	for r, err := searchFunc(request); ; r, err = searchFunc(request) {
-		if err != nil {
-			return rsc, err
-		}
-		if r.OpcNextPage != nil {
-			tc.log.Debug("search response",
-				slog.Int("status", r.RawResponse.StatusCode),
-				slog.String("next page", *r.OpcNextPage))
-		} else {
-			tc.log.Debug("search response",
-				slog.Int("status", r.RawResponse.StatusCode))
-		}
-
-		rsc.Items = append(rsc.Items, r.Items...)
-
-		if r.OpcNextPage != nil {
-			request.Page = r.OpcNextPage
-		} else {
-			break
-		}
-	}
-	tc.log.Debug("finished search")
-
-	return rsc, nil
-}
-
 func (tc *TagController) SetRegion(region string) {
+	tc.region = region
 	tc.search.SetRegion(region)
 	tc.handler.SetRegion(region)
 }
 
-// Run starts the controller spawning workers and queuing tasks
-func (tc *TagController) Run(controlWg *sync.WaitGroup) {
-	defer controlWg.Done()
-	tc.log.Info("Beginning TagController Run")
-
-	// Search for supported resource types
-	collection, err := tc.Search(QUERY)
-	if err != nil {
-		tc.log.Error("error searching for resources",
-			slog.String("error", err.Error()))
-		return
+func (tc *TagController) Search(
+	ctx context.Context,
+	query string,
+) (rs.ResourceSummaryCollection, error) {
+	collection := rs.ResourceSummaryCollection{Items: make([]rs.ResourceSummary, 0)}
+	req := rs.SearchResourcesRequest{
+		SearchDetails: rs.StructuredSearchDetails{
+			Query: common.String(query),
+		},
+		Limit: common.Int(1000),
 	}
-	tc.log.Debug("items received from search",
-		slog.Int("count", len(collection.Items)))
-
-	// Make control objects, taskschannel for resources and WaitGroup to sync workers
-	// with controller
-	resources := make(chan rs.ResourceSummary, TC_WORK_QUEUE)
-	var workerWg sync.WaitGroup
-
-	// Create workers
-	for i := range TC_WORK_QUEUE {
-		go tc.worker(i, resources, &workerWg)
-		workerWg.Add(1)
+	pages := make(map[string]bool)
+	ids := make(map[string]bool)
+	for {
+		resp, err := ociapi.Call(
+			ctx,
+			tc.limiter,
+			func(ctx context.Context) (rs.SearchResourcesResponse, error) {
+				return tc.search.SearchResources(ctx, req)
+			},
+		)
+		if err != nil {
+			return collection, err
+		}
+		for _, item := range resp.Items {
+			if item.Identifier != nil {
+				if ids[*item.Identifier] {
+					continue
+				}
+				ids[*item.Identifier] = true
+			}
+			collection.Items = append(collection.Items, item)
+		}
+		if resp.OpcNextPage == nil || *resp.OpcNextPage == "" {
+			break
+		}
+		if pages[*resp.OpcNextPage] {
+			return collection, fmt.Errorf("repeated resource search pagination token")
+		}
+		pages[*resp.OpcNextPage] = true
+		req.Page = resp.OpcNextPage
 	}
-
-	// Add items to tasks queue
-	for _, item := range collection.Items {
-		resources <- item
-	}
-
-	// Send close signal to workers once out of items and wait for workers to finish
-	close(resources)
-	workerWg.Wait()
+	return collection, nil
 }
 
-// worker does the work of taking resources, creating tasks, and calling handlers
-func (tc *TagController) worker(id uint8, resources <-chan rs.ResourceSummary,
-	wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	// Log attribute to identify worker
-	logGroup := slog.Group("Worker",
-		slog.Int("ID", int(id)))
-	tc.log.Debug("Started Worker", logGroup)
-
-	for {
-		if item, more := <-resources; more {
-			itemGroup := slog.Group("Resource", logGroup,
-				slog.String("Identifier", *item.Identifier),
-				slog.String("Type", *item.ResourceType))
-
-			activeSchedule, err := tc.scheduler.ActiveSchedule(
-				item.DefinedTags[tc.tagNamespace])
-			if err != nil {
-				tc.log.Error("error problem reading active schedule",
-					"error", err,
-					"tags", item.DefinedTags[tc.tagNamespace])
-				continue
-			}
-
-			tc.log.Info("Handling Resource", itemGroup,
-				slog.String("active schedule", activeSchedule))
-
-			act, err := tc.scheduler.Evaluate(activeSchedule)
-			if err != nil {
-				tc.log.Warn("error evaluating resource", itemGroup,
-					"error", err)
-			}
-
-			// If controller action and scheduler action are not compatible, skip
-			if !action.Compare(tc.action, act) {
-				tc.log.Info("No action required", itemGroup,
-					slog.Any("Controller Action", tc.action))
-				continue
-			}
-
-			err = tc.handler.HandleResource(task.NewTask(act, item))
-			if err != nil {
-				tc.log.Error("error handling resource",
-					itemGroup,
-					"error", err)
-			}
-
-		} else {
-			tc.log.Debug("Work finished", logGroup)
+// Plan performs read-only discovery and validation. Any planning error prevents
+// execution of this result. Resources without the schedule namespace are skipped.
+func (tc *TagController) Plan(ctx context.Context) (Result, error) {
+	result := Result{
+		Region:    tc.region,
+		DryRun:    true,
+		StartedAt: time.Now().UTC(),
+		Resources: make([]ResourceResult, 0),
+	}
+	collection, err := tc.Search(ctx, QUERY)
+	if err != nil {
+		result.Error = err.Error()
+		result.FinishedAt = time.Now().UTC()
+		return result, err
+	}
+	result.Resources = make([]ResourceResult, len(collection.Items))
+	parallel(len(collection.Items), func(i int) {
+		item := collection.Items[i]
+		r := ResourceResult{
+			ID:     value(item.Identifier),
+			Type:   value(item.ResourceType),
+			Action: "none",
+			Status: "skipped",
+		}
+		defer func() { result.Resources[i] = r }()
+		fail := func(err error) { r.Status = "failed"; r.Error = err.Error() }
+		if err := ctx.Err(); err != nil {
+			fail(err)
 			return
 		}
+		tags, ok := item.DefinedTags[tc.tagNamespace]
+		if !ok {
+			return
+		}
+		if r.ID == "" || r.Type == "" {
+			fail(fmt.Errorf("resource ID and type are required"))
+			return
+		}
+		a, err := tc.scheduler.Evaluate(tags)
+		if err != nil {
+			fail(err)
+			return
+		}
+		r.Action = a.String()
+		if !action.Compare(tc.action, a) {
+			return
+		}
+		if !handler.Supported(r.Type) {
+			fail(fmt.Errorf("unsupported resource type %q", r.Type))
+			return
+		}
+		ops, err := tc.handler.Plan(ctx, task.NewTask(a, item))
+		if err != nil {
+			fail(err)
+			return
+		}
+		r.Operations = ops
+		r.Status = "noop"
+		for _, op := range ops {
+			if op.Status == "planned" {
+				r.Status = "planned"
+			}
+		}
+	})
+	err = resultErrors(result)
+	if err != nil {
+		result.Error = err.Error()
 	}
+	result.FinishedAt = time.Now().UTC()
+	return result, err
+}
+
+// Execute consumes only a successful plan and rechecks state before submission.
+func (tc *TagController) Execute(ctx context.Context, plan Result) (Result, error) {
+	if plan.Region != tc.region {
+		return plan, fmt.Errorf("plan region does not match controller")
+	}
+	if plan.Error != "" {
+		return plan, fmt.Errorf("cannot execute failed plan: %s", plan.Error)
+	}
+	if err := resultErrors(plan); err != nil {
+		return plan, fmt.Errorf("cannot execute failed plan: %w", err)
+	}
+	// Copy slices so executing does not mutate the caller's dry-run plan.
+	result := plan
+	result.DryRun = false
+	result.Resources = append([]ResourceResult(nil), plan.Resources...)
+	parallel(len(result.Resources), func(i int) {
+		r := result.Resources[i]
+		if r.Status != "planned" && r.Status != "noop" {
+			return
+		}
+		r.Operations = append([]handler.Operation(nil), r.Operations...)
+		var errs []error
+		r.Status = "noop"
+		for j, op := range r.Operations {
+			// Continue after node failures so the report retains every attempted outcome.
+			updated, err := tc.handler.Execute(ctx, op)
+			r.Operations[j] = updated
+			if err != nil {
+				errs = append(errs, err)
+			} else if updated.Status == "submitted" {
+				r.Status = "submitted"
+			}
+		}
+		if err := errors.Join(errs...); err != nil {
+			r.Status = "failed"
+			r.Error = err.Error()
+		}
+		result.Resources[i] = r
+	})
+	err := resultErrors(result)
+	if err != nil {
+		result.Error = err.Error()
+	}
+	result.FinishedAt = time.Now().UTC()
+	return result, err
+}
+
+func resultErrors(result Result) error {
+	var errs []error
+	for _, r := range result.Resources {
+		if r.Error != "" {
+			errs = append(errs, fmt.Errorf("%s %s: %s", r.Type, r.ID, r.Error))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// parallel assigns each index once and joins all workers before returning.
+// Callers can write distinct preallocated slice elements without a mutex.
+func parallel(n int, fn func(int)) {
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for range min(n, TC_WORK_QUEUE) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				fn(i)
+			}
+		}()
+	}
+	for i := range n {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+}
+func value(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
