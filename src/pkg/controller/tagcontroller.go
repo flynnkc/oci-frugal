@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -33,6 +35,7 @@ type SearchAPI interface {
 }
 
 type TagController struct {
+	log          *slog.Logger
 	tagNamespace string
 	region       string
 	scheduler    scheduler.Scheduler
@@ -73,7 +76,12 @@ func NewTagController(opts ControllerOpts) (*TagController, error) {
 		limiter.Close()
 		return nil, err
 	}
+	var log *slog.Logger
+	if opts.LogFunc != nil {
+		log = opts.LogFunc()
+	}
 	c := &TagController{
+		log:          log,
 		tagNamespace: *opts.TagNamespace,
 		scheduler:    opts.Scheduler,
 		action:       opts.SupportedActions,
@@ -112,6 +120,7 @@ func (tc *TagController) Search(
 	pages := make(map[string]bool)
 	ids := make(map[string]bool)
 	for {
+		tc.logger().Debug("Resource discovery page started", "region", tc.region)
 		resp, err := ociapi.Call(
 			ctx,
 			tc.limiter,
@@ -122,6 +131,7 @@ func (tc *TagController) Search(
 		if err != nil {
 			return collection, err
 		}
+		tc.logger().Debug("Resource discovery page received", "region", tc.region, "items", len(resp.Items))
 		for _, item := range resp.Items {
 			if item.Identifier != nil {
 				if ids[*item.Identifier] {
@@ -167,7 +177,11 @@ func (tc *TagController) Plan(ctx context.Context) (Result, error) {
 			Action: "none",
 			Status: "skipped",
 		}
-		defer func() { result.Resources[i] = r }()
+		tc.logger().Debug("Resource planning started", "region", tc.region, "resource_id", r.ID, "type", r.Type)
+		defer func() {
+			result.Resources[i] = r
+			tc.logger().Debug("Resource planning finished", "region", tc.region, "resource_id", r.ID, "action", r.Action, "status", r.Status, "error", r.Error)
+		}()
 		fail := func(err error) { r.Status = "failed"; r.Error = err.Error() }
 		if err := ctx.Err(); err != nil {
 			fail(err)
@@ -240,7 +254,9 @@ func (tc *TagController) Execute(ctx context.Context, plan Result) (Result, erro
 		r.Status = "noop"
 		for j, op := range r.Operations {
 			// Continue after node failures so the report retains every attempted outcome.
+			tc.logger().Debug("Operation state check and execution started", "region", tc.region, "resource_id", op.ID, "action", op.Action)
 			updated, err := tc.handler.Execute(ctx, op)
+			tc.logger().Debug("Operation finished", "region", tc.region, "resource_id", op.ID, "status", updated.Status, "request_id", updated.RequestID, "error", err)
 			r.Operations[j] = updated
 			if err != nil {
 				errs = append(errs, err)
@@ -297,4 +313,12 @@ func value(p *string) string {
 		return ""
 	}
 	return *p
+}
+
+// Tests and embedded callers may omit logging.
+func (tc *TagController) logger() *slog.Logger {
+	if tc.log != nil {
+		return tc.log
+	}
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }

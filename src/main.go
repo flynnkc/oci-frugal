@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strconv"
@@ -57,6 +58,7 @@ func command(
 		writeCommandError(out, errOut, err)
 		return 2
 	}
+	opts.LogWriter = errOut
 	cfg, err := configuration.NewConfiguration(opts)
 	if err != nil {
 		writeCommandError(out, errOut, err)
@@ -124,9 +126,21 @@ func run(
 		}
 		return r, err
 	}
+	log := cfg.MakeLog()
+	log.Info("Run started", "dry_run", cfg.DryRun(), "timeout", cfg.Timeout(), "timezone", cfg.Timezone().String())
+	stopProgress := startProgress(ctx, log, 15*time.Second)
+	defer stopProgress()
+	defer func() {
+		if r.Error != "" {
+			log.Error("Run failed", "phase", r.Phase, "error", r.Error)
+		} else {
+			log.Info("Run finished", "phase", r.Phase, "elapsed", time.Since(r.StartedAt))
+		}
+	}()
 	regions := []string{*cfg.Region()}
 	if regions[0] == "" {
 		var err error
+		log.Info("Discovering subscribed regions")
 		regions, err = deps.regions(ctx, cfg)
 		if err != nil {
 			return finish(err)
@@ -135,6 +149,7 @@ func run(
 	if len(regions) == 0 {
 		return finish(fmt.Errorf("no subscribed regions"))
 	}
+	log.Info("Planning regions", "count", len(regions))
 	// Freeze one instant for all regions, interpreted in the selected timezone.
 	sch := scheduler.NewAnykeyNLSchedulerAt(r.StartedAt, cfg.Timezone())
 	controllers := make([]controller.Controller, len(regions))
@@ -153,6 +168,7 @@ func run(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			log.Info("Region planning started", "region", region)
 			c, err := deps.controller(controller.ControllerOpts{
 				ConfigurationProvider: cfg.Provider(),
 				TagNamespace:          cfg.TagNamespace(),
@@ -173,6 +189,7 @@ func run(
 			}
 			controllers[i] = c
 			r.Regions[i], err = c.Plan(ctx)
+			log.Info("Region planning finished", "region", region, "resources", len(r.Regions[i].Resources), "error", err)
 			if err != nil {
 				errs[i] = fmt.Errorf("%s: %w", region, err)
 			}
@@ -193,12 +210,15 @@ func run(
 		return finish(nil)
 	}
 	r.Phase = "execution"
+	log.Info("Submitting planned operations")
 	for i, c := range controllers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			var err error
+			log.Info("Region execution started", "region", regions[i])
 			r.Regions[i], err = c.Execute(ctx, r.Regions[i])
+			log.Info("Region execution finished", "region", regions[i], "error", err)
 			if err != nil {
 				errs[i] = fmt.Errorf("%s: %w", regions[i], err)
 			}
@@ -300,4 +320,28 @@ func parseOptions(
 		return opts, fmt.Errorf("unexpected positional arguments: %v", fs.Args())
 	}
 	return opts, nil
+}
+
+// startProgress reports liveness even while discovery or SDK calls are waiting.
+// Stop joins the goroutine before the diagnostic writer can be reused by callers.
+func startProgress(ctx context.Context, log *slog.Logger, interval time.Duration) func() {
+	done, stopped := make(chan struct{}), make(chan struct{})
+	started := time.Now()
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				log.Debug("Run cancellation received", "error", ctx.Err())
+				return
+			case <-ticker.C:
+				log.Debug("Run still active", "elapsed", time.Since(started))
+			}
+		}
+	}()
+	return func() { close(done); <-stopped }
 }

@@ -173,3 +173,19 @@ prioritized adoption gates and validation limits, and the
 [AGENTS.md](AGENTS.md) guides AI-assisted changes;
 [CONTRIBUTING.md](CONTRIBUTING.md) describes review and local checks (`make check`).
 See [SECURITY.md](SECURITY.md) for credential handling and private reporting.
+
+### Execution progress
+
+Use `-v debug` (or `FRUGAL_LOG_LEVEL=debug`) for discovery-page progress,
+resource planning decisions, operation outcomes and a heartbeat every 15 seconds
+while the run is active. Info level reports run and regional phase boundaries;
+warn/error levels suppress routine progress. Diagnostics go to stderr immediately,
+while stdout remains the final JSON report. For example:
+
+```sh
+/tmp/oci-frugal -dry-run -region us-ashburn-1 -tz America/New_York -v debug > report.json
+```
+
+The heartbeat indicates the process is active, including while waiting on rate
+limits or SDK responses; it does not indicate cloud operation completion. Debug
+logs contain resource identifiers and should be handled as infrastructure metadata.

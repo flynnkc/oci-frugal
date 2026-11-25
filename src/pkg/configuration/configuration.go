@@ -2,6 +2,7 @@ package configuration
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"time"
@@ -52,6 +53,7 @@ type Configuration struct {
 // ConfigurationOpts contains unvalidated inputs shared by CLI and API callers.
 // Nil optional values receive defaults in NewConfiguration; explicit values are validated.
 type ConfigurationOpts struct {
+	LogWriter     io.Writer      // Optional diagnostic destination; defaults to stderr.
 	LogLevel      *string        // Default Info
 	Action        *string        // Default All
 	TagNamespace  *string        // Default Schedule
@@ -102,6 +104,16 @@ func NewConfiguration(opts ConfigurationOpts) (*Configuration, error) {
 			return nil, fmt.Errorf("invalid log level %q", *opts.LogLevel)
 		}
 	}
+
+	// Share one handler across regional workers, including when the destination
+	// is a caller-provided writer rather than os.Stderr.
+	if opts.LogWriter != nil {
+		level := new(slog.Level)
+		_ = level.UnmarshalText([]byte(strings.ToUpper(*opts.LogLevel)))
+		logger := logFactory(opts.LogWriter, &slog.HandlerOptions{Level: *level, AddSource: *level == slog.LevelDebug}, TEXT_HANDLER)
+		logFunc = logger.With
+	}
+	logFunc().Debug("Initializing configuration and authentication")
 
 	var tz *time.Location
 	if opts.Timezone == nil {

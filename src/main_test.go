@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -236,4 +237,72 @@ func TestOptionalStringFlagsPreserveUnsetAndEmptyValues(t *testing.T) {
 	require.NotNil(t, opts.TagNamespace)
 	assert.Empty(t, *opts.TagNamespace)
 	assert.Nil(t, opts.Timezone)
+}
+
+func TestCommandProgressDiagnostics(t *testing.T) {
+	for _, level := range []string{"debug", "info", "warn"} {
+		t.Run(level, func(t *testing.T) {
+			var out, diagnostics bytes.Buffer
+			deps := dependencies{controller: func(opts controller.ControllerOpts) (controller.Controller, error) {
+				opts.LogFunc().Debug("mock discovery progress")
+				return &fakeController{region: "test"}, nil
+			}}
+			code := command(context.Background(), []string{"-dry-run", "-region", "test", "-v", level}, noEnv, &out, &diagnostics, deps)
+			require.Equal(t, 0, code)
+			var result report
+			require.NoError(t, json.Unmarshal(out.Bytes(), &result))
+			assert.Equal(t, "dry_run", result.Phase)
+			logs := diagnostics.String()
+			if level == "warn" {
+				assert.Empty(t, logs)
+				return
+			}
+			assert.Contains(t, logs, "Run started")
+			assert.Contains(t, logs, "Region planning started")
+			assert.Contains(t, logs, "Region planning finished")
+			assert.Contains(t, logs, "Run finished")
+			assert.Equal(t, level == "debug", strings.Contains(logs, "mock discovery progress"))
+		})
+	}
+}
+
+type progressWriter struct{ messages chan string }
+
+func (w progressWriter) Write(p []byte) (int, error) {
+	select {
+	case w.messages <- string(p):
+	default:
+	}
+	return len(p), nil
+}
+
+func TestProgressHeartbeatAndShutdown(t *testing.T) {
+	messages := make(chan string, 16)
+	log := slog.New(slog.NewTextHandler(progressWriter{messages}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	stop := startProgress(context.Background(), log, time.Millisecond)
+	select {
+	case message := <-messages:
+		assert.Contains(t, message, "Run still active")
+	case <-time.After(time.Second):
+		t.Fatal("no heartbeat while work is waiting")
+	}
+	stop() // joins the writer goroutine
+	for len(messages) > 0 {
+		<-messages
+	}
+	select {
+	case message := <-messages:
+		t.Fatalf("heartbeat after shutdown: %s", message)
+	case <-time.After(10 * time.Millisecond):
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	stop = startProgress(ctx, log, time.Hour)
+	cancel()
+	select {
+	case message := <-messages:
+		assert.Contains(t, message, "Run cancellation received")
+	case <-time.After(time.Second):
+		t.Fatal("no cancellation diagnostic")
+	}
+	stop()
 }
