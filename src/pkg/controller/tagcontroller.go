@@ -43,6 +43,7 @@ type TagController struct {
 	close        func()
 }
 
+// Compile type check
 var _ Controller = (*TagController)(nil)
 
 func NewTagController(opts ControllerOpts) (*TagController, error) {

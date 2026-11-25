@@ -147,6 +147,7 @@ func run(
 	}()
 	r.Regions = make([]controller.Result, len(regions))
 	errs := make([]error, len(regions))
+
 	var wg sync.WaitGroup
 	for i, region := range regions {
 		wg.Add(1)

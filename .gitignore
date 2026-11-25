@@ -1,1 +1,13 @@
 .vscode
+
+# Local credentials and run artifacts
+.oci/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+/bin/
+/oci-frugal
+/coverage.out
+/reports/

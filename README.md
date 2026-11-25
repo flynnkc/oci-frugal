@@ -164,3 +164,12 @@ and schedule precedence, lifecycle checks, graceful/hard Compute shutdown, DB pa
 and multiple nodes, discovery/action failures, stale state, cancellation, limiter
 shutdown, and process exit codes. They do not contact OCI. Live OCI integration and
 comparative performance benchmarks remain outstanding.
+
+## Internal adoption and development
+
+See the [readiness assessment](docs/READINESS.md) for the internal pilot verdict,
+prioritized adoption gates and validation limits, and the
+[operations runbook](docs/OPERATIONS.md) for controlled execution and recovery.
+[AGENTS.md](AGENTS.md) guides AI-assisted changes;
+[CONTRIBUTING.md](CONTRIBUTING.md) describes review and local checks (`make check`).
+See [SECURITY.md](SECURITY.md) for credential handling and private reporting.
