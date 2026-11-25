@@ -16,7 +16,11 @@ Restrict Schedule tag editing to approved administrators.
 Use one executor and a scheduler that prevents overlapping invocations. Scheduler
 protection must also cover manual runs. A process-local state check cannot prevent
 multiple hosts issuing requests. Set explicit region, timezone, namespace, timeout
-and action. Do not rely on host timezone or the all-regions default.
+and action. Set `-rate` and `-burst` to the budget allocated to this tool in each
+region (defaults: 2 attempts/second, burst 4), leaving headroom for other callers.
+Review regional API usage summaries for attempts, retries, throttling and cumulative
+limiter wait. Independent invocations do not share budgets. Do not rely on host
+timezone or the all-regions default.
 
 ## Preview and enable
 

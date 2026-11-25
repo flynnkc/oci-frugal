@@ -94,6 +94,8 @@ Flags override environment variables.
 | `-dry-run` | `FRUGAL_DRY_RUN` | `false` |
 | `-action` | `FRUGAL_ACTION_TYPE` | `all` (`all`, `on`, `off`) |
 | `-shutdown` | `FRUGAL_SHUTDOWN` | `soft` (`soft`, `hard`) |
+| `-rate` | `FRUGAL_RATE` | `2` HTTP attempts/second per region |
+| `-burst` | `FRUGAL_BURST` | `4` requests per region |
 | `-timeout` | `FRUGAL_TIMEOUT` | `10m` for the entire run |
 | `-tz` | `FRUGAL_TIMEZONE` | Host local timezone |
 | `-region` | `FRUGAL_REGION` | All ready subscribed regions |
@@ -137,12 +139,37 @@ deleted, and unknown states return errors instead of sending conflicting request
 Execution continues collecting other resource/node outcomes after individual failures;
 previously accepted writes cannot be rolled back.
 
-There are eight workers and one shared request limiter per region (eight SDK calls every
-15 seconds, with an initial burst of eight). Reads, node discovery, state checks, and
-writes consume tokens. SDK-internal retries retain their SDK policy; mutations do not
-receive a blanket application retry. Each SDK call has a 30-second deadline inside the
-run timeout. Interrupt and termination signals cancel the run. Limiter goroutines close
-on completion and construction failure.
+There are eight workers and one shared request limiter per region. The default is
+**2 HTTP attempts/second with a burst of 4**, refilling one token every 500 ms.
+Use `-rate` / `FRUGAL_RATE` and `-burst` / `FRUGAL_BURST` to tune the budget;
+flags override environment values. Rates must be finite and positive with a
+representable refill interval, and bursts must be positive integers.
+
+Resource Search, Compute, Database and Analytics share the regional budget.
+Reads, node discovery, state checks, writes **and SDK retries** consume tokens
+at the SDK HTTP dispatcher. Authentication/credential refresh and initial Identity
+region discovery are outside this budget. Different processes have independent
+budgets; this does not reserve tenancy capacity or coordinate with other callers.
+These defaults are a starting allocation, not an OCI service limit. Leave headroom
+for other automation and tune using observed throttling and run duration.
+
+A 429 applies a shared regional cooldown: exponential backoff with jitter starts
+at 2–4 seconds and grows to 30–60 seconds. The dispatcher does not replay requests;
+SDK retry eligibility and retry limits remain unchanged. A cooldown also delays
+other pending calls in that region. No blanket application mutation retry is added.
+Each SDK operation has a 30-second deadline, including limiter waits, retry backoff
+and HTTP attempts, inside the overall run timeout. Waiting can therefore time out
+before a request is sent. Interrupt and termination signals cancel the run.
+Limiter goroutines close on completion and construction failure.
+
+Debug logs include each HTTP attempt, retry attempt number, status and wait time.
+Regional info summaries include HTTP attempt count, retries, 429 count and cumulative
+limiter wait (summed across workers, so it can exceed wall-clock run duration).
+For example, to reserve a smaller local budget:
+
+```sh
+/tmp/oci-frugal -dry-run -region us-ashburn-1 -rate 1 -burst 2 -v debug
+```
 
 Run the CLI from an external scheduler at the desired interval. Avoid overlapping
 invocations: cross-process deduplication, durable jobs, completion tracking, and

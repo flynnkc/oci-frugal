@@ -39,6 +39,8 @@ type ResourceResult struct {
 }
 
 type ControllerOpts struct {
+	Rate                  float64 // Zero selects the default.
+	Burst                 int     // Zero selects the default.
 	ConfigurationProvider common.ConfigurationProvider
 	TagNamespace          *string
 	Region                *string

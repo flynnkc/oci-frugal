@@ -42,7 +42,6 @@ type TagController struct {
 	action       action.Action
 	handler      handler.Handler
 	search       SearchAPI
-	limiter      ociapi.Limiter
 	close        func()
 }
 
@@ -61,10 +60,27 @@ func NewTagController(opts ControllerOpts) (*TagController, error) {
 		opts.SupportedActions != action.OFF {
 		return nil, ErrControllerOptions
 	}
-	limiter := ociapi.NewLimiter()
+	rate, burst := opts.Rate, opts.Burst
+	if rate == 0 {
+		rate = ociapi.DefaultRate
+	}
+	if burst == 0 {
+		burst = ociapi.DefaultBurst
+	}
+	limiter, err := ociapi.NewConfiguredLimiter(rate, burst)
+	if err != nil {
+		return nil, err
+	}
+	var log *slog.Logger
+	if opts.LogFunc != nil {
+		log = opts.LogFunc("region", value(opts.Region))
+	}
+	budget := ociapi.NewBudget(limiter, log)
+
 	h, err := handler.NewResourceHandler(handler.HandlerOpts{
 		ConfigProvider: opts.ConfigurationProvider,
-		Limiter:        limiter,
+		Limiter:        budget,
+		Log:            log,
 		Shutdown:       opts.Shutdown,
 	})
 	if err != nil {
@@ -76,10 +92,7 @@ func NewTagController(opts ControllerOpts) (*TagController, error) {
 		limiter.Close()
 		return nil, err
 	}
-	var log *slog.Logger
-	if opts.LogFunc != nil {
-		log = opts.LogFunc()
-	}
+	s.HTTPClient = ociapi.NewDispatcher(s.HTTPClient, budget, log)
 	c := &TagController{
 		log:          log,
 		tagNamespace: *opts.TagNamespace,
@@ -87,8 +100,7 @@ func NewTagController(opts ControllerOpts) (*TagController, error) {
 		action:       opts.SupportedActions,
 		handler:      h,
 		search:       &s,
-		limiter:      limiter,
-		close:        limiter.Close,
+		close:        func() { limiter.Close(); budget.Summary() },
 	}
 	if opts.Region != nil {
 		c.SetRegion(*opts.Region)
@@ -123,7 +135,6 @@ func (tc *TagController) Search(
 		tc.logger().Debug("Resource discovery page started", "region", tc.region)
 		resp, err := ociapi.Call(
 			ctx,
-			tc.limiter,
 			func(ctx context.Context) (rs.SearchResourcesResponse, error) {
 				return tc.search.SearchResources(ctx, req)
 			},

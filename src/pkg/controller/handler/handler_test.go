@@ -16,14 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type allow struct{ calls int }
-
-func (a *allow) Acquire(context.Context) bool { a.calls++; return true }
-
-type deny struct{}
-
-func (deny) Acquire(context.Context) bool { return false }
-
 type computeMock struct {
 	ComputeAPI
 	state         core.InstanceLifecycleStateEnum
@@ -160,8 +152,7 @@ func TestComputePlanAndExecute(t *testing.T) {
 		core.InstanceActionActionStop,
 	} {
 		m := &computeMock{state: core.InstanceLifecycleStateRunning}
-		lim := &allow{}
-		h := &ResourceHandler{compute: m, limiter: lim, shutdown: policy}
+		h := &ResourceHandler{compute: m, shutdown: policy}
 		ops, err := h.Plan(
 			context.Background(),
 			task.NewTask(action.OFF, resource("Instance", "vm")),
@@ -176,14 +167,12 @@ func TestComputePlanAndExecute(t *testing.T) {
 		assert.Equal(t, "request", op.RequestID)
 		assert.Equal(t, policy, m.sent)
 		// Planning reads, execution rechecks state, and submission each consume a token.
-		assert.Equal(t, 3, lim.calls)
 	}
 }
 func TestExecuteRechecksStateAndPropagatesErrors(t *testing.T) {
 	m := &computeMock{state: core.InstanceLifecycleStateStopped}
 	h := &ResourceHandler{
 		compute:  m,
-		limiter:  &allow{},
 		shutdown: core.InstanceActionActionSoftstop,
 	}
 	// The instance stopped after planning; execution must trust the fresh OCI state.
@@ -222,7 +211,7 @@ func TestAnalyticsStateChecks(t *testing.T) {
 		{analytics.AnalyticsInstanceLifecycleStateInactive, "on", "submitted", 1, 0},
 	} {
 		m := &analyticsMock{state: tt.state}
-		h := &ResourceHandler{analytics: m, limiter: &allow{}}
+		h := &ResourceHandler{analytics: m}
 		op, err := h.Execute(context.Background(), Operation{
 			ID:     "oac",
 			Type:   "AnalyticsInstance",
@@ -237,7 +226,7 @@ func TestAnalyticsStateChecks(t *testing.T) {
 func TestDbNodePaginationAndFailures(t *testing.T) {
 	for _, fail := range []int{0, 2} {
 		db := &dbMock{failPage: fail, state: database.DbNodeLifecycleStateStopped}
-		h := &ResourceHandler{database: db, limiter: &allow{}}
+		h := &ResourceHandler{database: db}
 		ops, err := h.Plan(
 			context.Background(),
 			task.NewTask(action.ON, resource("DbSystem", "db")),
@@ -263,26 +252,17 @@ func TestDbNodePaginationAndFailures(t *testing.T) {
 		assert.Equal(t, 2, db.actions)
 	}
 	db := &dbMock{shape: "BM.DenseIO2.52"}
-	h := &ResourceHandler{database: db, limiter: &allow{}}
+	h := &ResourceHandler{database: db}
 	_, err := h.Plan(context.Background(), task.NewTask(action.ON, resource("DbSystem", "db")))
 	assert.ErrorContains(t, err, "VM DB systems only")
 	assert.Zero(t, db.pages)
 }
-func TestInvalidInputAndLimiterNeverWrite(t *testing.T) {
+func TestInvalidInputAndCancellationNeverWrite(t *testing.T) {
 	m := &computeMock{state: core.InstanceLifecycleStateStopped}
-	h := &ResourceHandler{compute: m, limiter: deny{}}
-	_, err := h.Execute(context.Background(), Operation{
-		ID:     "vm",
-		Type:   "Instance",
-		Action: "on",
-	})
-	assert.ErrorContains(t, err, "limiter closed")
-	assert.Zero(t, m.reads)
-	assert.Zero(t, m.writes)
+	h := &ResourceHandler{compute: m}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	h.limiter = &allow{}
-	_, err = h.Execute(ctx, Operation{ID: "vm", Type: "Instance", Action: "on"})
+	_, err := h.Execute(ctx, Operation{ID: "vm", Type: "Instance", Action: "on"})
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.Zero(t, m.reads)
 	for _, r := range []rs.ResourceSummary{

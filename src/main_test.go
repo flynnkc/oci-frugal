@@ -306,3 +306,33 @@ func TestProgressHeartbeatAndShutdown(t *testing.T) {
 	}
 	stop()
 }
+
+func TestRateFlagsOverrideEnvironmentAndReachControllers(t *testing.T) {
+	env := func(key string) (string, bool) {
+		values := map[string]string{"FRUGAL_RATE": "0.5", "FRUGAL_BURST": "1"}
+		v, ok := values[key]
+		return v, ok
+	}
+	for _, flags := range []bool{false, true} {
+		args := []string{"-dry-run", "-region", "test"}
+		rate, burst := 0.5, 1
+		if flags {
+			args = append(args, "-rate", "3", "-burst", "6")
+			rate, burst = 3, 6
+		}
+		var out, diagnostics bytes.Buffer
+		var gotRate float64
+		var gotBurst int
+		deps := dependencies{controller: func(opts controller.ControllerOpts) (controller.Controller, error) {
+			gotRate, gotBurst = opts.Rate, opts.Burst
+			return &fakeController{region: "test"}, nil
+		}}
+		require.Equal(t, 0, command(context.Background(), args, env, &out, &diagnostics, deps))
+		assert.Equal(t, rate, gotRate)
+		assert.Equal(t, burst, gotBurst)
+	}
+	for _, args := range [][]string{{"-rate", "0"}, {"-rate", "NaN"}, {"-burst", "0"}} {
+		var out, diagnostics bytes.Buffer
+		require.Equal(t, 2, command(context.Background(), args, noEnv, &out, &diagnostics, dependencies{}))
+	}
+}

@@ -18,10 +18,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type allow struct{}
-
-func (allow) Acquire(context.Context) bool { return true }
-
 type searchMock struct {
 	// Unstubbed interface methods deliberately fail if a test calls them unexpectedly.
 	SearchAPI
@@ -115,7 +111,6 @@ func testController(items ...rs.ResourceSummary) (*TagController, *handlerMock, 
 		action:  action.ALL,
 		handler: h,
 		search:  s,
-		limiter: allow{},
 	}, h, s
 }
 func TestPlanIsReadOnlyAndDeduplicates(t *testing.T) {

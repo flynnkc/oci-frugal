@@ -21,7 +21,8 @@ certification of OCI behavior.
   and blocks execution of failed plans.
 - controller/handler/handler.go supports Compute, VM DB nodes and Analytics;
   rechecks lifecycle state and distinguishes no-op, submitted and failed outcomes.
-- ociapi/call.go applies a shared regional limiter and per-call deadline.
+- ociapi/call.go bounds SDK operations; ociapi/dispatcher.go gates HTTP attempts
+  through a shared regional budget, including retries and shared 429 cooldowns.
 - Scheduler parsing and precedence, partial failures, cancellation, pagination,
   dry-run boundaries and CLI outcomes have mocked regression coverage.
 - Existing GitHub Actions checks formatting, race tests, vet and build with
@@ -40,7 +41,7 @@ certification of OCI behavior.
 | Pilot blocker | Require human review and passing CI in repository settings; documentation alone does not enforce them. | Named maintainers, protected default branch, required Go checks and reviewed dependency PRs. |
 | Pilot blocker | Install monitoring and reproducible delivery process. No scheduler/deployment manifest or release workflow exists. | Build from reviewed revision; record binary checksum, revision and Go version; retain previous binary; alert on nonzero exits, missing runs and failed/ambiguous operations; test alert delivery. |
 | Before wider internal use | Add explicit compartment/resource allowlist and maximum-operation guard, preferably explicit execution opt-in. Current principal and region are the only hard external scope boundaries. | Negative tests prove out-of-scope resources never get writes; operator reviews default behavior change. |
-| Before wider internal use | Tune concurrency/limiting against realistic regional inventory. Eight workers and fixed per-region quotas have no comparative performance evidence. | Measured discovery/plan/run times fit the cadence and timeout under throttling; resource and memory bounds recorded. |
+| Before wider internal use | Tune concurrency/limiting against realistic regional inventory. Eight workers and configurable regional budgets have no comparative performance evidence. | Measured discovery/plan/run times fit the cadence and timeout under throttling; resource and memory bounds recorded. |
 | Before wider internal use | Stabilize report contract and identity. JSON has timestamps/request IDs but no explicit schema version, build revision or unique run ID. | Consumers have compatibility fixtures; artifacts correlate run, revision and cloud audit events. |
 | Production follow-up | Durable job history, distributed coordination, completion polling and stronger release provenance as requirements warrant. | Separate design and operational acceptance. These are not mandatory to a single-executor pilot with documented external controls. |
 

@@ -2,8 +2,10 @@ package configuration
 
 import (
 	"fmt"
+	"github.com/flynnkc/oci-frugal/src/pkg/ociapi"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,6 +37,8 @@ type LogFunc func(...any) *slog.Logger
 // Configuration is responsible for validating and storing any configuration related
 // variables. Default configurations should be set here.
 type Configuration struct {
+	rate               float64
+	burst              int
 	timezone           *time.Location               // Timezone to run script against
 	region             string                       // Region to run script on (Optional)
 	tagNamespace       string                       // Tag Namespace to use, default Schedule
@@ -53,6 +57,8 @@ type Configuration struct {
 // ConfigurationOpts contains unvalidated inputs shared by CLI and API callers.
 // Nil optional values receive defaults in NewConfiguration; explicit values are validated.
 type ConfigurationOpts struct {
+	Rate          *string        // Requests per second per region.
+	Burst         *string        // Maximum regional burst.
 	LogWriter     io.Writer      // Optional diagnostic destination; defaults to stderr.
 	LogLevel      *string        // Default Info
 	Action        *string        // Default All
@@ -70,6 +76,24 @@ type ConfigurationOpts struct {
 
 func NewConfiguration(opts ConfigurationOpts) (*Configuration, error) {
 	// Execution defaults and validation belong here so all callers use the same rules.
+	rate, burst := ociapi.DefaultRate, ociapi.DefaultBurst
+	var rateErr error
+	if opts.Rate != nil {
+		rate, rateErr = strconv.ParseFloat(*opts.Rate, 64)
+		if rateErr != nil {
+			return nil, fmt.Errorf("rate: %w", rateErr)
+		}
+	}
+	if opts.Burst != nil {
+		burst, rateErr = strconv.Atoi(*opts.Burst)
+		if rateErr != nil {
+			return nil, fmt.Errorf("burst: %w", rateErr)
+		}
+	}
+	if err := ociapi.ValidateLimits(rate, burst); err != nil {
+		return nil, err
+	}
+
 	shutdown := DEFAULT_SHUTDOWN
 	if opts.Shutdown != nil {
 		shutdown = *opts.Shutdown
@@ -199,6 +223,7 @@ func NewConfiguration(opts ConfigurationOpts) (*Configuration, error) {
 	}
 
 	o := Configuration{
+		rate: rate, burst: burst,
 		timezone:           tz,
 		region:             *opts.Region,
 		tagNamespace:       *opts.TagNamespace,
@@ -275,3 +300,6 @@ func (c *Configuration) Shutdown() string {
 func (c *Configuration) Timeout() time.Duration {
 	return c.timeout
 }
+
+func (c *Configuration) Rate() float64 { return c.rate }
+func (c *Configuration) Burst() int    { return c.burst }

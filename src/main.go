@@ -177,6 +177,7 @@ func run(
 				SupportedActions:      *cfg.Action(),
 				LogFunc:               cfg.MakeLog,
 				Shutdown:              cfg.Shutdown(),
+				Rate:                  cfg.Rate(), Burst: cfg.Burst(),
 			})
 			if err != nil {
 				errs[i] = fmt.Errorf("%s: %w", region, err)
@@ -253,6 +254,8 @@ func parseOptions(
 		})
 	}
 
+	stringFlag(&opts.Rate, "rate", "RATE", "Maximum sustained requests/second per region (default 2)")
+	stringFlag(&opts.Burst, "burst", "BURST", "Maximum request burst per region (default 4)")
 	stringFlag(&opts.Timezone, "tz", "TIMEZONE", "Timezone, e.g. America/New_York")
 	stringFlag(&opts.Action, "action", "ACTION_TYPE", "Power filter: all, on, off")
 	stringFlag(

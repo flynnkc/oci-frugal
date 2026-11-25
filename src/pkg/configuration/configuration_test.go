@@ -14,6 +14,11 @@ func TestInvalidConfiguration(t *testing.T) {
 	negativeTimeout := -time.Second
 	for _, opts := range []ConfigurationOpts{
 		{Action: common.String("up")},
+		{Rate: common.String("0")}, {Rate: common.String("-1")},
+		{Rate: common.String("NaN")}, {Rate: common.String("Inf")},
+		{Rate: common.String("bad")}, {Rate: common.String("1e100")},
+		{Burst: common.String("0")}, {Burst: common.String("-1")},
+		{Burst: common.String("2.5")},
 		{LogLevel: common.String("verbose")},
 		{TagNamespace: common.String("")},
 		{Timezone: common.String("not/a/timezone")},
@@ -34,6 +39,8 @@ func TestExecutionDefaults(t *testing.T) {
 	cfg, err := NewConfiguration(ConfigurationOpts{})
 	require.NoError(t, err)
 	assert.False(t, cfg.DryRun())
+	assert.Equal(t, 2.0, cfg.Rate())
+	assert.Equal(t, 4, cfg.Burst())
 	assert.Equal(t, "soft", cfg.Shutdown())
 	assert.Equal(t, 10*time.Minute, cfg.Timeout())
 }
@@ -49,4 +56,11 @@ func TestExplicitExecutionConfiguration(t *testing.T) {
 	assert.True(t, cfg.DryRun())
 	assert.Equal(t, "hard", cfg.Shutdown())
 	assert.Equal(t, timeout, cfg.Timeout())
+}
+
+func TestRateConfiguration(t *testing.T) {
+	cfg, err := NewConfiguration(ConfigurationOpts{Rate: common.String("0.5"), Burst: common.String("2")})
+	require.NoError(t, err)
+	assert.Equal(t, 0.5, cfg.Rate())
+	assert.Equal(t, 2, cfg.Burst())
 }

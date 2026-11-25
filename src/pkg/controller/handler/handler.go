@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/flynnkc/oci-frugal/src/pkg/action"
@@ -77,11 +78,11 @@ type ResourceHandler struct {
 	compute   ComputeAPI
 	database  DatabaseAPI
 	analytics AnalyticsAPI
-	limiter   ociapi.Limiter
 	shutdown  core.InstanceActionActionEnum
 }
 
 type HandlerOpts struct {
+	Log            *slog.Logger
 	ConfigProvider common.ConfigurationProvider
 	Limiter        ociapi.Limiter
 	Shutdown       string
@@ -111,11 +112,13 @@ func NewResourceHandler(opts HandlerOpts) (*ResourceHandler, error) {
 	if err != nil {
 		return nil, err
 	}
+	compute.HTTPClient = ociapi.NewDispatcher(compute.HTTPClient, opts.Limiter, opts.Log)
+	db.HTTPClient = ociapi.NewDispatcher(db.HTTPClient, opts.Limiter, opts.Log)
+	a.HTTPClient = ociapi.NewDispatcher(a.HTTPClient, opts.Limiter, opts.Log)
 	return &ResourceHandler{
 		compute:   &compute,
 		database:  &db,
 		analytics: &a,
-		limiter:   opts.Limiter,
 		shutdown:  shutdown,
 	}, nil
 }
@@ -159,7 +162,6 @@ func (h *ResourceHandler) Plan(ctx context.Context, t task.Task) ([]Operation, e
 	}
 	system, err := ociapi.Call(
 		ctx,
-		h.limiter,
 		func(ctx context.Context) (database.GetDbSystemResponse, error) {
 			return h.database.GetDbSystem(ctx, database.GetDbSystemRequest{DbSystemId: &op.ID})
 		},
@@ -184,7 +186,6 @@ func (h *ResourceHandler) Plan(ctx context.Context, t task.Task) ([]Operation, e
 	for {
 		resp, err := ociapi.Call(
 			ctx,
-			h.limiter,
 			func(ctx context.Context) (database.ListDbNodesResponse, error) {
 				return h.database.ListDbNodes(ctx, req)
 			},
@@ -233,7 +234,6 @@ func (h *ResourceHandler) inspect(ctx context.Context, op Operation) (Operation,
 	case "Instance":
 		r, err := ociapi.Call(
 			ctx,
-			h.limiter,
 			func(ctx context.Context) (core.GetInstanceResponse, error) {
 				return h.compute.GetInstance(ctx, core.GetInstanceRequest{InstanceId: &op.ID})
 			},
@@ -245,7 +245,6 @@ func (h *ResourceHandler) inspect(ctx context.Context, op Operation) (Operation,
 	case "DbNode":
 		r, err := ociapi.Call(
 			ctx,
-			h.limiter,
 			func(ctx context.Context) (database.GetDbNodeResponse, error) {
 				return h.database.GetDbNode(ctx, database.GetDbNodeRequest{DbNodeId: &op.ID})
 			},
@@ -257,7 +256,6 @@ func (h *ResourceHandler) inspect(ctx context.Context, op Operation) (Operation,
 	case "AnalyticsInstance":
 		r, err := ociapi.Call(
 			ctx,
-			h.limiter,
 			func(ctx context.Context) (analytics.GetAnalyticsInstanceResponse, error) {
 				return h.analytics.GetAnalyticsInstance(
 					ctx,
@@ -329,7 +327,6 @@ func (h *ResourceHandler) Execute(ctx context.Context, op Operation) (Operation,
 		}
 		r, e := ociapi.Call(
 			ctx,
-			h.limiter,
 			func(ctx context.Context) (core.InstanceActionResponse, error) {
 				return h.compute.InstanceAction(ctx, core.InstanceActionRequest{
 					InstanceId: &op.ID,
@@ -346,7 +343,6 @@ func (h *ResourceHandler) Execute(ctx context.Context, op Operation) (Operation,
 		}
 		r, e := ociapi.Call(
 			ctx,
-			h.limiter,
 			func(ctx context.Context) (database.DbNodeActionResponse, error) {
 				return h.database.DbNodeAction(ctx, database.DbNodeActionRequest{
 					DbNodeId: &op.ID,
@@ -360,7 +356,6 @@ func (h *ResourceHandler) Execute(ctx context.Context, op Operation) (Operation,
 		if op.Action == "on" {
 			r, e := ociapi.Call(
 				ctx,
-				h.limiter,
 				func(ctx context.Context) (analytics.StartAnalyticsInstanceResponse, error) {
 					return h.analytics.StartAnalyticsInstance(
 						ctx,
@@ -375,7 +370,6 @@ func (h *ResourceHandler) Execute(ctx context.Context, op Operation) (Operation,
 		} else {
 			r, e := ociapi.Call(
 				ctx,
-				h.limiter,
 				func(ctx context.Context) (analytics.StopAnalyticsInstanceResponse, error) {
 					return h.analytics.StopAnalyticsInstance(
 						ctx,
